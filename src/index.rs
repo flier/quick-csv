@@ -47,19 +47,19 @@ impl Index {
     pub fn is_delimiter(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
-        (self.delimiters[pos / 64] & (1 << pos % 64)) != 0
+        (self.delimiters[pos / 64] & (1 << (pos % 64))) != 0
     }
 
     pub fn is_quote(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
-        (self.quotes[pos / 64] & (1 << pos % 64)) != 0
+        (self.quotes[pos / 64] & (1 << (pos % 64))) != 0
     }
 
     pub fn is_terminator(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
-        (self.terminators[pos / 64] & (1 << pos % 64)) != 0
+        (self.terminators[pos / 64] & (1 << (pos % 64))) != 0
     }
 
     pub fn next_line(&self, mut span: Range<usize>) -> Option<Range<usize>> {
@@ -77,14 +77,20 @@ impl Index {
                         if end == span.start {
                             span.start += 1;
 
-                            if span.len() == 0 {
+                            if span.start >= span.end {
                                 return None;
                             }
                         } else {
                             return Some(span.start..end);
                         }
                     }
-                    None => return if span.len() == 0 { None } else { Some(span) },
+                    None => {
+                        return if span.start >= span.end {
+                            None
+                        } else {
+                            Some(span)
+                        };
+                    }
                 }
             }
         }
@@ -116,7 +122,7 @@ impl Index {
         let end = span.end / 64;
 
         let len = if start == end {
-            let b = (index[start] >> (span.start % 64)) & (1 << span.end % 64) - 1;
+            let b = (index[start] >> (span.start % 64)) & ((1 << (span.end % 64)) - 1);
 
             b.trailing_zeros() as usize
         } else {
@@ -133,7 +139,7 @@ impl Index {
             }
 
             if off == end {
-                b = index[end] & ((1 << span.end % 64) - 1);
+                b = index[end] & ((1 << (span.end % 64)) - 1);
 
                 len += (span.end % 64).min(b.trailing_zeros() as usize)
             }
@@ -386,7 +392,7 @@ impl IndexBuilder {
 
                     quote_count += self.index.quotes[i].wrapping_shl(64 - n).count_ones();
 
-                    w = w >> (n + 1);
+                    w >>= n + 1;
 
                     if (quote_count & 1) == 1 {
                         *b &= !(1 << n);
