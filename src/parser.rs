@@ -1,4 +1,6 @@
 use alloc::borrow::Cow;
+use alloc::string::String;
+use alloc::vec;
 use core::ops::{Deref, Range};
 use core::ptr::NonNull;
 use core::str;
@@ -149,8 +151,44 @@ impl<'a> Record<'a> {
     }
 
     #[inline]
-    pub fn unescaped_str(&self) -> Result<Cow<str>, str::Utf8Error> {
-        self.line().lines().unescape_utf8(self.span.clone())
+    pub fn unescaped<T: Escaped<'a> + ?Sized>(&'a self) -> Result<T::Unescaped, T::Error> {
+        T::unescape(self.line().lines(), self.span.clone())
+    }
+
+    #[cfg(feature = "codec")]
+    pub fn unescape_string(
+        &self,
+        encoding: ::encoding::EncodingRef,
+        trap: ::encoding::DecoderTrap,
+    ) -> Result<String, ::encoding::CodecError> {
+        self.line()
+            .lines()
+            .unescape_string(self.span.clone(), encoding, trap)
+    }
+}
+
+pub trait Escaped<'a> {
+    type Unescaped;
+    type Error;
+
+    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Self::Unescaped, Self::Error>;
+}
+
+impl<'a> Escaped<'a> for str {
+    type Unescaped = Cow<'a, str>;
+    type Error = str::Utf8Error;
+
+    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Cow<'a, str>, Self::Error> {
+        lines.unescape_str(span.clone())
+    }
+}
+
+impl<'a> Escaped<'a> for [u8] {
+    type Unescaped = Cow<'a, [u8]>;
+    type Error = ();
+
+    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Cow<'a, [u8]>, Self::Error> {
+        Ok(lines.unescape_bytes(span.clone()))
     }
 }
 
@@ -290,8 +328,42 @@ impl<'a> Lines<'a> {
         self.line
     }
 
-    #[inline]
-    fn unescape_utf8(&self, mut span: Range<usize>) -> Result<Cow<str>, str::Utf8Error> {
+    fn unescape_bytes(&self, mut span: Range<usize>) -> Cow<[u8]> {
+        debug_assert!(
+            span.start < self.index.len && span.end <= self.index.len,
+            "span={:?}, len={}",
+            span,
+            self.index.len
+        );
+
+        if span.len() > 1
+            && !self.index.quotes.is_empty()
+            && self.index.is_quote(span.start)
+            && self.index.is_quote(span.end - 1)
+        {
+            span = span.start + 1..span.end - 1
+        }
+
+        let mut off = span.start;
+        let mut v = vec![];
+
+        while let Some(pos) = self.index.next_escape(off..span.end) {
+            v.extend_from_slice(&self.buf[off..pos]);
+            off = pos + 1;
+            if span.end < off {
+                break;
+            }
+        }
+
+        if off == span.start {
+            (&self.buf[span.clone()]).into()
+        } else {
+            v.extend_from_slice(&self.buf[off..span.end]);
+            v.into()
+        }
+    }
+
+    fn unescape_str(&self, mut span: Range<usize>) -> Result<Cow<str>, str::Utf8Error> {
         debug_assert!(
             span.start < self.index.len && span.end <= self.index.len,
             "span={:?}, len={}",
@@ -323,6 +395,66 @@ impl<'a> Lines<'a> {
         } else {
             s.push_str(str::from_utf8(&self.buf[off..span.end])?);
             Ok(s.into())
+        }
+    }
+}
+
+#[cfg(feature = "codec")]
+impl<'a> Lines<'a> {
+    fn unescape_string(
+        &self,
+        mut span: Range<usize>,
+        encoding: ::encoding::EncodingRef,
+        trap: ::encoding::DecoderTrap,
+    ) -> Result<String, ::encoding::CodecError> {
+        debug_assert!(
+            span.start < self.index.len && span.end <= self.index.len,
+            "span={:?}, len={}",
+            span,
+            self.index.len
+        );
+
+        if span.len() > 1
+            && !self.index.quotes.is_empty()
+            && self.index.is_quote(span.start)
+            && self.index.is_quote(span.end - 1)
+        {
+            span = span.start + 1..span.end - 1
+        }
+
+        let mut off = span.start;
+        let mut s = String::new();
+
+        while let Some(pos) = self.index.next_escape(off..span.end) {
+            s.push_str(&encoding.decode(&self.buf[off..pos], trap).map_err(|s| {
+                ::encoding::CodecError {
+                    upto: off as isize,
+                    cause: s,
+                }
+            })?);
+            off = pos + 1;
+            if span.end < off {
+                break;
+            }
+        }
+
+        if off == span.start {
+            encoding
+                .decode(&self.buf[off..span.end], trap)
+                .map_err(|s| ::encoding::CodecError {
+                    upto: off as isize,
+                    cause: s,
+                })
+        } else {
+            s.push_str(
+                &encoding
+                    .decode(&self.buf[off..span.end], trap)
+                    .map_err(|s| ::encoding::CodecError {
+                        upto: off as isize,
+                        cause: s,
+                    })?,
+            );
+            Ok(s)
         }
     }
 }
@@ -383,29 +515,21 @@ zzz,yyy,xxx"#,
     fn test_parse_double_quote() {
         let _ = pretty_env_logger::try_init();
 
-        let parser = Parser::default();
-        let lines = parser.parse(
-            br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#,
-        );
+        let s = br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#;
 
         assert_eq!(
-            lines.index,
-            Index {
-                delimiters: vec![0x8020, 0],
-                quotes: vec![0x0001_4051, 0x8000_0000_0001],
-                terminators: vec![0, 0],
-                escapes: Some(vec![0x8008_0080_0800_0900, 0x0008_0080_0800]),
-                len: 112,
-            }
-        );
-
-        assert_eq!(
-            lines
-                .map(|line| line
-                    .map(|record| record.unescaped_str().unwrap().into_owned())
-                    .collect::<Vec<_>>())
+            Parser::default().parse(s)
+                .flat_map(|line| line
+                    .map(|record| record.unescaped::<[u8]>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
-            vec![vec!["aaa", "b\"b\"b", "0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"]]
+            vec![&b"aaa"[..], &b"b\"b\"b"[..], &b"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"[..]]
+        );
+        assert_eq!(
+            Parser::default().parse(s)
+                .flat_map(|line| line
+                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
+                .collect::<Vec<_>>(),
+            vec!["aaa", "b\"b\"b", "0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"]
         );
     }
 
@@ -459,7 +583,7 @@ zzz,yyy,xxx"#,
         assert_eq!(
             Parser::default()
                 .parse(s)
-                .flat_map(|line| line.map(|record| record.unescaped_str().unwrap().into_owned()))
+                .flat_map(|line| line.map(|record| record.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -469,7 +593,7 @@ zzz,yyy,xxx"#,
                 .without_double_quote()
                 .build()
                 .parse(s)
-                .flat_map(|line| line.map(|record| record.unescaped_str().unwrap().into_owned()))
+                .flat_map(|line| line.map(|record| record.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -497,6 +621,35 @@ zzz,yyy,xxx"#,
                 .flat_map(|line| line.map(|record| record.as_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b", "bb\"", "ccc", "zzz", "yyy", "xxx"]
+        );
+    }
+
+    #[cfg(feature = "codec")]
+    #[test]
+    fn test_parse_str_with_codec() {
+        use encoding::types::Encoding;
+
+        let _ = pretty_env_logger::try_init();
+
+        let s = encoding::all::GBK
+            .encode("测试,你好,世界", encoding::EncoderTrap::Ignore)
+            .unwrap();
+
+        assert!(Parser::default()
+            .parse(s.as_slice())
+            .flat_map(|line| line.map(|record| record.as_str().map(|s| s.to_owned())))
+            .collect::<Result<Vec<_>, str::Utf8Error>>()
+            .is_err());
+
+        assert_eq!(
+            Parser::default()
+                .parse(s.as_slice())
+                .flat_map(|line| line.map(|record| record
+                    .unescape_string(encoding::all::GBK, encoding::DecoderTrap::Ignore)))
+                .collect::<Result<Vec<_>, encoding::CodecError>>()
+                .map_err(|_| ())
+                .unwrap(),
+            vec!["测试", "你好", "世界"]
         );
     }
 }

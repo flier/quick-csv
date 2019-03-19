@@ -5,13 +5,15 @@ authors = ["Flier Lu <flier.lu@gmail.com>"]
 edition = "2018"
 
 [features]
-default = ["std"]
+default = ["std", "codec"]
 std = []
+codec = ["encoding", "std"]
 
 [dependencies]
 log = "0.4"
 cfg-if = "0.1"
 csv-core = "0.1"
+encoding = { version = "0.2", optional = true }
 
 [dev-dependencies]
 pretty_env_logger = "0.3"
