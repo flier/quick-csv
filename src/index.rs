@@ -19,7 +19,7 @@ pub struct Index {
     pub delimiters: Vec<u64>,
     pub quotes: Vec<u64>,
     pub terminators: Vec<u64>,
-    pub escapes: Vec<u64>,
+    pub escapes: Option<Vec<u64>>,
     pub len: usize,
 }
 
@@ -31,7 +31,7 @@ impl Index {
             delimiters: Vec::with_capacity(capacity),
             quotes: Vec::with_capacity(capacity),
             terminators: Vec::with_capacity(capacity),
-            escapes: Vec::with_capacity(capacity),
+            escapes: None,
             len: 0,
         }
     }
@@ -40,114 +40,112 @@ impl Index {
         self.delimiters.clear();
         self.quotes.clear();
         self.terminators.clear();
-        self.escapes.clear();
+        self.escapes = None;
         self.len = 0;
     }
 
-    pub fn line_at(&self, mut pos: usize) -> Option<Range<usize>> {
-        debug_assert!(pos < self.len, "pos={}, len={}", pos, self.len);
+    pub fn is_delimiter(&self, pos: usize) -> bool {
+        debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
-        let start = pos / 64;
-        let mut b = self.terminators[start] >> (pos % 64);
+        (self.delimiters[pos / 64] & (1 << pos % 64)) != 0
+    }
 
+    pub fn is_quote(&self, pos: usize) -> bool {
+        debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
+
+        (self.quotes[pos / 64] & (1 << pos % 64)) != 0
+    }
+
+    pub fn is_terminator(&self, pos: usize) -> bool {
+        debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
+
+        (self.terminators[pos / 64] & (1 << pos % 64)) != 0
+    }
+
+    pub fn next_line(&self, mut span: Range<usize>) -> Option<Range<usize>> {
         // skip the leading terminators
-        let r = (!b).trailing_zeros();
-        if r > 0 {
-            pos += r as usize;
-            b >>= r;
+        while span.start < span.end && self.is_terminator(span.start) {
+            span.start += 1
         }
 
-        if self.len < pos {
+        if span.start == span.end {
             None
         } else {
-            let mut i = start;
-            let end = self.terminators.len();
-            let mut len = 0;
+            loop {
+                match self.next_occurred(&self.terminators, &span) {
+                    Some(end) => {
+                        if end == span.start {
+                            span.start += 1;
 
-            // skip the empty line
-            while len == 0 && i < end {
-                while b == 0 {
-                    i += 1;
-
-                    if i >= end {
-                        break;
+                            if span.len() == 0 {
+                                return None;
+                            }
+                        } else {
+                            return Some(span.start..end);
+                        }
                     }
-
-                    b = self.terminators[i];
-
-                    if b == 0 {
-                        len += 64;
-                    } else {
-                        break;
-                    }
+                    None => return if span.len() == 0 { None } else { Some(span) },
                 }
-
-                if i < end {
-                    len += b.trailing_zeros() as usize;
-                } else if i == start + 1 {
-                    len += self.len - pos;
-                } else {
-                    len += self.len % 64;
-                }
-            }
-
-            if len == 0 {
-                None
-            } else {
-                Some(pos..pos + len)
             }
         }
     }
 
-    pub fn record_at(&self, span: Range<usize>) -> Range<usize> {
+    pub fn next_record(&self, span: Range<usize>) -> Range<usize> {
+        let end = self
+            .next_occurred(&self.delimiters, &span)
+            .unwrap_or(span.end);
+
+        span.start..end
+    }
+
+    pub fn next_escape(&self, span: Range<usize>) -> Option<usize> {
+        self.escapes
+            .as_ref()
+            .and_then(|escapes| self.next_occurred(escapes, &span))
+    }
+
+    fn next_occurred(&self, index: &[u64], span: &Range<usize>) -> Option<usize> {
         debug_assert!(
-            span.start < self.len && span.end <= self.len,
+            span.start < span.end && span.end <= index.len() * 64,
             "span={:?}, len={}",
             span,
-            self.len
+            index.len() * 64
         );
 
         let start = span.start / 64;
         let end = span.end / 64;
 
         let len = if start == end {
-            let mut b = self.delimiters[start];
+            let b = (index[start] >> (span.start % 64)) & (1 << span.end % 64) - 1;
 
-            b >>= span.start % 64;
-            b &= (1 << span.end % 64) - 1;
-
-            span.len().min(b.trailing_zeros() as usize)
+            b.trailing_zeros() as usize
         } else {
-            let mut i = start;
-            let mut b = self.delimiters[i] >> (span.start % 64);
+            let mut b = index[start] >> (span.start % 64);
             let mut len = (64 - span.start % 64).min(b.trailing_zeros() as usize);
+            let mut off = start;
 
-            loop {
-                i += 1;
+            while b == 0 && off < end {
+                off += 1;
 
-                if i == end {
-                    break;
-                }
+                b = index[start];
 
-                b = self.delimiters[i];
-
-                if b == 0 {
-                    len += 64
-                } else {
-                    break;
-                }
+                len += b.trailing_zeros() as usize;
             }
 
-            if b != 0 {
-                len + b.trailing_zeros() as usize
-            } else {
-                b = self.delimiters[end] & ((1 << span.end % 64) - 1);
+            if off == end {
+                b = index[end] & ((1 << span.end % 64) - 1);
 
-                len + (span.end % 64).min(b.trailing_zeros() as usize)
+                len += (span.end % 64).min(b.trailing_zeros() as usize)
             }
+
+            len
         };
 
-        span.start..span.start + len
+        if len < span.len() {
+            Some(span.start + len)
+        } else {
+            None
+        }
     }
 }
 
@@ -244,20 +242,19 @@ impl IndexBuilder {
             self.index.delimiters.reserve(len);
             self.index.quotes.reserve(len);
             self.index.terminators.reserve(len);
-            self.index.escapes.reserve(len);
         }
 
         unsafe {
             self.build_structural_character_bitmap(buf);
         }
 
-        if self.double_quote {
-            self.build_structural_quote_bitmap();
+        if self.quote.is_some() {
+            if self.double_quote {
+                self.index.escapes = Some(self.build_structural_quote_bitmap());
+            }
+
+            self.build_structural_line_bitmap();
         }
-
-        self.build_structural_line_bitmap();
-
-        trace!("build finished");
 
         self.index.len += buf.len();
     }
@@ -345,25 +342,28 @@ impl IndexBuilder {
     }
 
     #[inline]
-    fn build_structural_quote_bitmap(&mut self) {
+    fn build_structural_quote_bitmap(&mut self) -> Vec<u64> {
         trace!(
             "build_structural_quote_bitmap with {} quotes",
             self.index.quotes.len()
         );
 
         let len = self.index.quotes.len();
+        let mut escapes = Vec::with_capacity(len);
 
         for i in 0..len - 1 {
             let dquote = ((self.index.quotes[i] >> 1) | self.index.quotes[i + 1] << 63)
                 & self.index.quotes[i];
             self.index.quotes[i] &= !(dquote | dquote << 1);
-            self.index.escapes.push(dquote);
+            escapes.push(dquote);
         }
 
         let b = &mut self.index.quotes[len - 1];
         let dquote = (*b >> 1) & *b;
         *b &= !(dquote | dquote << 1);
-        self.index.escapes.push(dquote);
+        escapes.push(dquote);
+
+        escapes
     }
 
     #[inline]
@@ -457,10 +457,10 @@ zzz,yyy,xxx"#,
 
         assert_eq!(b.quotes, vec![0x40fc_0180_8000]);
 
-        b.build_structural_quote_bitmap();
+        let escapes = b.build_structural_quote_bitmap();
 
         assert_eq!(b.quotes, vec![0x4000_0000_8000]);
-        assert_eq!(b.escapes, vec![0x007c_0080_0000]);
+        assert_eq!(escapes, vec![0x007c_0080_0000]);
 
         b.clear();
 

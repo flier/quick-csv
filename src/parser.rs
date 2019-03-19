@@ -3,16 +3,62 @@ use core::ops::{Deref, Range};
 use core::ptr::NonNull;
 use core::str;
 
-use csv_core::Terminator;
-
 use crate::index::{Index, IndexBuilder, COMMA, QUOTE};
+
+#[derive(Debug, Default)]
+pub struct Builder {
+    parser: Parser,
+}
+
+impl Builder {
+    pub fn build(self) -> Parser {
+        self.parser
+    }
+
+    /// The delimiter that separates fields.
+    pub fn with_delimiter(mut self, delimiter: u8) -> Self {
+        self.parser.delimiter = delimiter;
+        self
+    }
+
+    /// The terminator that separates records.
+    pub fn with_terminator(mut self, terminator: u8) -> Self {
+        self.parser.terminator = Some(terminator);
+        self
+    }
+
+    /// Whether to recognize escaped quotes.
+    pub fn with_escape(mut self, escape: u8) -> Self {
+        self.parser.escape = Some(escape);
+        self
+    }
+
+    /// Whether to recognized doubled quotes.
+    pub fn without_double_quote(mut self) -> Self {
+        self.parser.double_quote = false;
+        self
+    }
+
+    /// If enabled, lines beginning with this byte are ignored.
+    pub fn with_comment(mut self, comment: u8) -> Self {
+        self.parser.comment = Some(comment);
+        self
+    }
+
+    /// If enabled (the default), then quotes are respected. When disabled,
+    /// quotes are not treated specially.
+    pub fn without_quoting(mut self) -> Self {
+        self.parser.quoting = false;
+        self
+    }
+}
 
 #[derive(Debug)]
 pub struct Parser {
     /// The delimiter that separates fields.
     delimiter: u8,
     /// The terminator that separates records.
-    term: Terminator,
+    terminator: Option<u8>,
     /// The quotation byte.
     quote: u8,
     /// Whether to recognize escaped quotes.
@@ -30,7 +76,7 @@ impl Default for Parser {
     fn default() -> Self {
         Parser {
             delimiter: COMMA,
-            term: Terminator::CRLF,
+            terminator: None,
             quote: QUOTE,
             escape: None,
             double_quote: true,
@@ -47,7 +93,7 @@ impl Parser {
         if self.delimiter != COMMA {
             index_builder.with_delimiter(self.delimiter);
         }
-        if let Terminator::Any(terminator) = self.term {
+        if let Some(terminator) = self.terminator {
             index_builder.with_terminator(terminator);
         }
         if !self.quoting {
@@ -97,13 +143,14 @@ impl<'a> Record<'a> {
         unsafe { self.line.as_ref() }
     }
 
+    #[inline]
     pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
         str::from_utf8(self.as_ref())
     }
 
     #[inline]
-    pub fn unescaped(&self) -> Cow<str> {
-        self.line().unescape(&self.span)
+    pub fn unescaped_str(&self) -> Result<Cow<str>, str::Utf8Error> {
+        self.line().lines().unescape_utf8(self.span.clone())
     }
 }
 
@@ -122,9 +169,12 @@ impl<'a> Iterator for Line<'a> {
         if self.pos >= self.span.end {
             None
         } else {
-            let span = self.lines().record_at(self.pos..self.span.end);
-            self.column += 1;
+            let span = self.lines().index.next_record(self.pos..self.span.end);
+
+            trace!("found record @ {:?}", span);
+
             self.pos = span.end + 1;
+            self.column += 1;
 
             Some(Record {
                 line: unsafe { NonNull::new_unchecked(self as *mut _) },
@@ -182,12 +232,6 @@ impl<'a> Line<'a> {
     pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
         str::from_utf8(self.as_ref())
     }
-
-    #[inline]
-    fn unescape(&self, span: &Range<usize>) -> Cow<str> {
-        self.lines()
-            .unescape(self.span.start + span.start..self.span.start + span.end)
-    }
 }
 
 pub struct Lines<'a> {
@@ -217,25 +261,25 @@ impl<'a> Deref for Lines<'a> {
 impl<'a> Iterator for Lines<'a> {
     type Item = Line<'a>;
 
-    fn next(&mut self) -> Option<Line<'a>> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.pos >= self.index.len {
             None
-        } else if let Some(span) = self.index.line_at(self.pos) {
-            trace!("found line @ {:?}", span);
-
-            let pos = span.start;
-            self.pos = span.end + 1;
-            self.line += 1;
-
-            Some(Line {
-                lines: unsafe { NonNull::new_unchecked(self as *mut _) },
-                span,
-                line: self.line,
-                column: 0,
-                pos,
-            })
         } else {
-            None
+            self.index.next_line(self.pos..self.index.len).map(|span| {
+                trace!("found line @ {:?}", span);
+
+                let pos = span.start;
+                self.pos = span.end + 1;
+                self.line += 1;
+
+                Line {
+                    lines: unsafe { NonNull::new_unchecked(self as *mut _) },
+                    span,
+                    line: self.line,
+                    column: 0,
+                    pos,
+                }
+            })
         }
     }
 }
@@ -247,8 +291,39 @@ impl<'a> Lines<'a> {
     }
 
     #[inline]
-    fn unescape(&self, span: Range<usize>) -> Cow<str> {
-        "".into()
+    fn unescape_utf8(&self, mut span: Range<usize>) -> Result<Cow<str>, str::Utf8Error> {
+        debug_assert!(
+            span.start < self.index.len && span.end <= self.index.len,
+            "span={:?}, len={}",
+            span,
+            self.index.len
+        );
+
+        if span.len() > 1
+            && !self.index.quotes.is_empty()
+            && self.index.is_quote(span.start)
+            && self.index.is_quote(span.end - 1)
+        {
+            span = span.start + 1..span.end - 1
+        }
+
+        let mut off = span.start;
+        let mut s = String::new();
+
+        while let Some(pos) = self.index.next_escape(off..span.end) {
+            s.push_str(str::from_utf8(&self.buf[off..pos])?);
+            off = pos + 1;
+            if span.end < off {
+                break;
+            }
+        }
+
+        if off == span.start {
+            str::from_utf8(&self.buf[span.clone()]).map(|s| s.into())
+        } else {
+            s.push_str(str::from_utf8(&self.buf[off..span.end])?);
+            Ok(s.into())
+        }
     }
 }
 
@@ -268,14 +343,14 @@ mod tests {
         let _ = pretty_env_logger::try_init();
 
         let parser = Parser::default();
-
-        assert_eq!(
-            parser
-                .parse(
-                    br#""aaa","b
+        let lines = parser.parse(
+            br#""aaa","b
 bb","ccc"
 zzz,yyy,xxx"#,
-                )
+        );
+
+        assert_eq!(
+            lines
                 .map(|line| line
                     .map(|record| record.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
@@ -301,6 +376,127 @@ zzz,yyy,xxx"#,
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
+        );
+    }
+
+    #[test]
+    fn test_parse_double_quote() {
+        let _ = pretty_env_logger::try_init();
+
+        let parser = Parser::default();
+        let lines = parser.parse(
+            br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#,
+        );
+
+        assert_eq!(
+            lines.index,
+            Index {
+                delimiters: vec![0x8020, 0],
+                quotes: vec![0x0001_4051, 0x8000_0000_0001],
+                terminators: vec![0, 0],
+                escapes: Some(vec![0x8008_0080_0800_0900, 0x0008_0080_0800]),
+                len: 112,
+            }
+        );
+
+        assert_eq!(
+            lines
+                .map(|line| line
+                    .map(|record| record.unescaped_str().unwrap().into_owned())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec!["aaa", "b\"b\"b", "0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"]]
+        );
+    }
+
+    #[test]
+    fn test_parse_tsv() {
+        let _ = pretty_env_logger::try_init();
+
+        let parser = Builder::default().with_delimiter(b'\t').build();
+        let lines = parser.parse(b"aaa\tbbb\tccc\nzzz\tyyy\txxx");
+
+        assert_eq!(
+            lines
+                .map(|line| line
+                    .map(|record| record.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
+        );
+    }
+
+    #[test]
+    fn test_parse_comment() {
+        let _ = pretty_env_logger::try_init();
+
+        let parser = Builder::default().with_comment(b'#').build();
+        let lines = parser.parse(b"#some comment\naaa,bbb,ccc\nzzz,yyy,xxx");
+
+        assert_eq!(
+            lines
+                .map(|line| if let Some(comment) = line.as_comment() {
+                    vec![comment.unwrap().to_owned()]
+                } else {
+                    line.map(|record| record.as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["some comment"],
+                vec!["aaa", "bbb", "ccc"],
+                vec!["zzz", "yyy", "xxx"]
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_without_double_quote() {
+        let _ = pretty_env_logger::try_init();
+
+        let s = b"aaa,b\"\"bb,ccc\nzzz,yyy,xxx";
+
+        assert_eq!(
+            Parser::default()
+                .parse(s)
+                .flat_map(|line| line.map(|record| record.unescaped_str().unwrap().into_owned()))
+                .collect::<Vec<_>>(),
+            vec!["aaa", "b\"bb", "ccc", "zzz", "yyy", "xxx"]
+        );
+
+        assert_eq!(
+            Builder::default()
+                .without_double_quote()
+                .build()
+                .parse(s)
+                .flat_map(|line| line.map(|record| record.unescaped_str().unwrap().into_owned()))
+                .collect::<Vec<_>>(),
+            vec!["aaa", "b\"\"bb", "ccc", "zzz", "yyy", "xxx"]
+        );
+    }
+
+    #[test]
+    fn test_parse_without_quoting() {
+        let _ = pretty_env_logger::try_init();
+
+        let s = b"aaa,\"b\nbb\",ccc\nzzz,yyy,xxx";
+
+        assert_eq!(
+            Parser::default()
+                .parse(s)
+                .flat_map(|line| line.map(|record| record.as_str().unwrap().to_owned()))
+                .collect::<Vec<_>>(),
+            vec!["aaa", "\"b\nbb\"", "ccc", "zzz", "yyy", "xxx"]
+        );
+
+        assert_eq!(
+            Builder::default()
+                .without_quoting()
+                .build()
+                .parse(s)
+                .flat_map(|line| line.map(|record| record.as_str().unwrap().to_owned()))
+                .collect::<Vec<_>>(),
+            vec!["aaa", "\"b", "bb\"", "ccc", "zzz", "yyy", "xxx"]
         );
     }
 }
