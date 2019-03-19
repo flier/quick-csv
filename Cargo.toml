@@ -10,6 +10,7 @@ std = []
 
 [dependencies]
 log = "0.4"
+cfg-if = "0.1"
 csv-core = "0.1"
 
 [dev-dependencies]

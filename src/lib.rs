@@ -3,9 +3,16 @@
 
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate cfg_if;
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
+cfg_if! {
+    if #[cfg(feature = "std")] {
+        extern crate std as alloc;
+    } else {
+        extern crate alloc;
+    }
+}
 
 mod avx;
 pub mod index;

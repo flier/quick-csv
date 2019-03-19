@@ -14,12 +14,13 @@ pub const QUOTE: u8 = b'"';
 pub const CR: u8 = b'\r';
 pub const LF: u8 = b'\n';
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Index {
-    delimiters: Vec<u64>,
-    quotes: Vec<u64>,
-    terminators: Vec<u64>,
-    len: usize,
+    pub delimiters: Vec<u64>,
+    pub quotes: Vec<u64>,
+    pub terminators: Vec<u64>,
+    pub escapes: Vec<u64>,
+    pub len: usize,
 }
 
 impl Index {
@@ -30,63 +31,116 @@ impl Index {
             delimiters: Vec::with_capacity(capacity),
             quotes: Vec::with_capacity(capacity),
             terminators: Vec::with_capacity(capacity),
+            escapes: Vec::with_capacity(capacity),
             len: 0,
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
     }
 
     pub fn clear(&mut self) {
         self.delimiters.clear();
         self.quotes.clear();
         self.terminators.clear();
+        self.escapes.clear();
+        self.len = 0;
     }
 
     pub fn line_at(&self, mut pos: usize) -> Option<Range<usize>> {
-        trace!("line_at(pos = {}), len = {}", pos, self.len);
+        debug_assert!(pos < self.len, "pos={}, len={}", pos, self.len);
 
-        if pos >= self.len {
+        let start = pos / 64;
+        let mut b = self.terminators[start] >> (pos % 64);
+
+        // skip the leading terminators
+        let r = (!b).trailing_zeros();
+        if r > 0 {
+            pos += r as usize;
+            b >>= r;
+        }
+
+        if self.len < pos {
             None
         } else {
-            let start = pos / 64;
             let mut i = start;
-            let mut b = self.terminators[i] >> (pos % 64);
+            let end = self.terminators.len();
+            let mut len = 0;
 
-            let r = (!b).trailing_zeros();
-            if r > 0 {
-                pos += r as usize;
-                b >>= r;
-            }
+            while b == 0 {
+                i += 1;
 
-            if pos >= self.len {
-                None
-            } else {
-                let mut len = 0;
-
-                while b == 0 {
-                    i += 1;
-
-                    if i < self.terminators.len() {
-                        len += 64;
-                        b = self.terminators[i];
-                    } else {
-                        break;
-                    }
+                if i == end {
+                    break;
                 }
 
-                if i < self.terminators.len() {
-                    len += b.trailing_zeros() as usize;
-                } else if i == start + 1 {
-                    len += self.len - pos;
+                b = self.terminators[i];
+
+                if b == 0 {
+                    len += 64;
                 } else {
-                    len += self.len % 64;
+                    break;
+                }
+            }
+
+            if i < end {
+                len += b.trailing_zeros() as usize;
+            } else if i == start + 1 {
+                len += self.len - pos;
+            } else {
+                len += self.len % 64;
+            }
+
+            Some(pos..pos + len)
+        }
+    }
+
+    pub fn record_at(&self, span: Range<usize>) -> Range<usize> {
+        debug_assert!(
+            span.start < self.len && span.end <= self.len,
+            "span={:?}, len={}",
+            span,
+            self.len
+        );
+
+        let start = span.start / 64;
+        let end = span.end / 64;
+
+        let len = if start == end {
+            let mut b = self.delimiters[start];
+
+            b >>= span.start % 64;
+            b &= (1 << span.end % 64) - 1;
+
+            span.len().min(b.trailing_zeros() as usize)
+        } else {
+            let mut i = start;
+            let mut b = self.delimiters[i] >> (span.start % 64);
+            let mut len = (64 - span.start % 64).min(b.trailing_zeros() as usize);
+
+            loop {
+                i += 1;
+
+                if i == end {
+                    break;
                 }
 
-                Some(pos..pos + len)
+                b = self.delimiters[i];
+
+                if b == 0 {
+                    len += 64
+                } else {
+                    break;
+                }
             }
-        }
+
+            if b != 0 {
+                len + b.trailing_zeros() as usize
+            } else {
+                b = self.delimiters[end] & ((1 << span.end % 64) - 1);
+
+                len + (span.end % 64).min(b.trailing_zeros() as usize)
+            }
+        };
+
+        span.start..span.start + len
     }
 }
 
@@ -183,6 +237,7 @@ impl IndexBuilder {
             self.index.delimiters.reserve(len);
             self.index.quotes.reserve(len);
             self.index.terminators.reserve(len);
+            self.index.escapes.reserve(len);
         }
 
         unsafe {
@@ -295,11 +350,13 @@ impl IndexBuilder {
             let dquote = ((self.index.quotes[i] >> 1) | self.index.quotes[i + 1] << 63)
                 & self.index.quotes[i];
             self.index.quotes[i] &= !(dquote | dquote << 1);
+            self.index.escapes.push(dquote);
         }
 
         let b = &mut self.index.quotes[len - 1];
         let dquote = (*b >> 1) & *b;
         *b &= !(dquote | dquote << 1);
+        self.index.escapes.push(dquote);
     }
 
     #[inline]
@@ -312,35 +369,15 @@ impl IndexBuilder {
         let mut quote_count = 0;
 
         for (i, b) in self.index.terminators.iter_mut().enumerate() {
-            trace!(
-                "i = {}, terminator = {:08x}, quote = {:08x}",
-                i,
-                b,
-                self.index.quotes[i]
-            );
-
             if *b == 0 {
-                let quotes = self.index.quotes[i].count_ones();
-
-                trace!("found {} quotes @ {:?}", quotes, i * 64..(i + 1) * 64);
-
-                quote_count += quotes;
+                quote_count += self.index.quotes[i].count_ones();
             } else {
                 let mut w = *b;
 
                 while w != 0 {
                     let n = w.trailing_zeros();
 
-                    let quotes = self.index.quotes[i].wrapping_shl(64 - n).count_ones();
-
-                    trace!(
-                        "found {} quotes @ {:?}, w = {:x}",
-                        quotes,
-                        i * 64..i * 64 + n as usize,
-                        w
-                    );
-
-                    quote_count += quotes;
+                    quote_count += self.index.quotes[i].wrapping_shl(64 - n).count_ones();
 
                     w = w >> (n + 1);
 
@@ -416,6 +453,7 @@ zzz,yyy,xxx"#,
         b.build_structural_quote_bitmap();
 
         assert_eq!(b.quotes, vec![0x4000_0000_8000]);
+        assert_eq!(b.escapes, vec![0x007c_0080_0000]);
 
         b.clear();
 

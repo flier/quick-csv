@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use core::ops::{Deref, Range};
 use core::ptr::NonNull;
 use core::str;
@@ -73,82 +74,119 @@ impl Parser {
 }
 
 pub struct Record<'a> {
-    line: &'a Line<'a>,
+    line: NonNull<Line<'a>>,
     span: Range<usize>,
+    column: usize,
 }
 
 impl<'a> AsRef<[u8]> for Record<'a> {
+    #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.line[self.span.start..self.span.end]
+        &self.line().lines().as_ref()[self.span.start..self.span.end]
     }
 }
 
-impl<'a> Deref for Record<'a> {
-    type Target = [u8];
+impl<'a> Record<'a> {
+    #[inline]
+    pub fn column(&self) -> usize {
+        self.column
+    }
 
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
+    #[inline]
+    pub fn line(&'a self) -> &'a Line<'a> {
+        unsafe { self.line.as_ref() }
+    }
+
+    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+        str::from_utf8(self.as_ref())
+    }
+
+    #[inline]
+    pub fn unescaped(&self) -> Cow<str> {
+        self.line().unescape(&self.span)
     }
 }
-
-impl<'a> Record<'a> {}
 
 pub struct Line<'a> {
     lines: NonNull<Lines<'a>>,
     span: Range<usize>,
     line: usize,
+    column: usize,
+    pos: usize,
 }
 
 impl<'a> Iterator for Line<'a> {
     type Item = Record<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        None
+        if self.pos >= self.span.end {
+            None
+        } else {
+            let span = self.lines().record_at(self.pos..self.span.end);
+            self.column += 1;
+            self.pos = span.end + 1;
+
+            Some(Record {
+                line: unsafe { NonNull::new_unchecked(self as *mut _) },
+                span,
+                column: self.column,
+            })
+        }
     }
 }
 
 impl<'a> AsRef<[u8]> for Line<'a> {
+    #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.lines()[self.span.start..self.span.end]
-    }
-}
-
-impl<'a> Deref for Line<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
+        &self.lines().as_ref()[self.span.start..self.span.end]
     }
 }
 
 impl<'a> Line<'a> {
-    fn lines(&self) -> &Lines<'a> {
+    #[inline]
+    pub fn lines(&'a self) -> &'a Lines<'a> {
         unsafe { self.lines.as_ref() }
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.span.len() == 0
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.span.len()
     }
 
+    #[inline]
     pub fn line(&self) -> usize {
         self.line
     }
 
+    #[inline]
     pub fn is_comment(&self) -> bool {
-        self.first().cloned() == self.lines().comment
+        self.as_ref().first().cloned() == self.lines().comment
     }
 
+    #[inline]
     pub fn as_comment(&self) -> Option<Result<&str, str::Utf8Error>> {
         if self.is_comment() {
-            self.split_first()
+            self.as_ref()
+                .split_first()
                 .map(|(_, comment)| str::from_utf8(comment))
         } else {
             None
         }
+    }
+
+    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+        str::from_utf8(self.as_ref())
+    }
+
+    #[inline]
+    fn unescape(&self, span: &Range<usize>) -> Cow<str> {
+        self.lines()
+            .unescape(self.span.start + span.start..self.span.start + span.end)
     }
 }
 
@@ -160,11 +198,19 @@ pub struct Lines<'a> {
     pos: usize,
 }
 
-impl<'a> Deref for Lines<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
+impl<'a> AsRef<[u8]> for Lines<'a> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
         self.buf
+    }
+}
+
+impl<'a> Deref for Lines<'a> {
+    type Target = Index;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.index
     }
 }
 
@@ -172,18 +218,21 @@ impl<'a> Iterator for Lines<'a> {
     type Item = Line<'a>;
 
     fn next(&mut self) -> Option<Line<'a>> {
-        if self.pos >= self.index.len() {
+        if self.pos >= self.index.len {
             None
         } else if let Some(span) = self.index.line_at(self.pos) {
             trace!("found line @ {:?}", span);
 
-            self.pos += span.len() + 1;
+            let pos = span.start;
+            self.pos = span.end + 1;
             self.line += 1;
 
             Some(Line {
                 lines: unsafe { NonNull::new_unchecked(self as *mut _) },
                 span,
                 line: self.line,
+                column: 0,
+                pos,
             })
         } else {
             None
@@ -192,21 +241,25 @@ impl<'a> Iterator for Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
+    #[inline]
     pub fn line(&self) -> usize {
         self.line
     }
 
-    pub fn position(&self) -> usize {
-        self.pos
+    #[inline]
+    fn unescape(&self, span: Range<usize>) -> Cow<str> {
+        "".into()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(feature = "std"))]
-    use alloc::borrow::ToOwned;
-    #[cfg(not(feature = "std"))]
-    use alloc::{vec, vec::Vec};
+    cfg_if! {
+        if #[cfg(not(feature = "std"))] {
+            use alloc::borrow::ToOwned;
+            use alloc::{vec, vec::Vec};
+        }
+    }
 
     use super::*;
 
@@ -223,9 +276,14 @@ mod tests {
 bb","ccc"
 zzz,yyy,xxx"#,
                 )
-                .map(|line| unsafe { str::from_utf8_unchecked(line.as_ref()) }.to_owned())
+                .map(|line| line
+                    .map(|record| record.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            vec!["\"aaa\",\"b\nbb\",\"ccc\"", "zzz,yyy,xxx"]
+            vec![
+                vec!["\"aaa\"", "\"b\nbb\"", "\"ccc\""],
+                vec!["zzz", "yyy", "xxx"]
+            ]
         );
     }
 
@@ -234,13 +292,17 @@ zzz,yyy,xxx"#,
         let _ = pretty_env_logger::try_init();
 
         let parser = Parser::default();
+        let lines = parser.parse(b"aaa,bbb,ccc\r\nzzz,yyy,xxx");
+
+        assert_eq!(lines.index.terminators, vec![0x1800]);
 
         assert_eq!(
-            parser
-                .parse(b"aaa,bbb,ccc\r\nzzz,yyy,xxx")
-                .map(|line| unsafe { str::from_utf8_unchecked(line.as_ref()) }.to_owned())
+            lines
+                .map(|line| line
+                    .map(|record| record.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            vec!["aaa,bbb,ccc", "zzz,yyy,xxx"]
+            vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
         );
     }
 }
