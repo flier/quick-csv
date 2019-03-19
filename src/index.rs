@@ -64,31 +64,38 @@ impl Index {
             let end = self.terminators.len();
             let mut len = 0;
 
-            while b == 0 {
-                i += 1;
+            // skip the empty line
+            while len == 0 && i < end {
+                while b == 0 {
+                    i += 1;
 
-                if i == end {
-                    break;
+                    if i >= end {
+                        break;
+                    }
+
+                    b = self.terminators[i];
+
+                    if b == 0 {
+                        len += 64;
+                    } else {
+                        break;
+                    }
                 }
 
-                b = self.terminators[i];
-
-                if b == 0 {
-                    len += 64;
+                if i < end {
+                    len += b.trailing_zeros() as usize;
+                } else if i == start + 1 {
+                    len += self.len - pos;
                 } else {
-                    break;
+                    len += self.len % 64;
                 }
             }
 
-            if i < end {
-                len += b.trailing_zeros() as usize;
-            } else if i == start + 1 {
-                len += self.len - pos;
+            if len == 0 {
+                None
             } else {
-                len += self.len % 64;
+                Some(pos..pos + len)
             }
-
-            Some(pos..pos + len)
         }
     }
 

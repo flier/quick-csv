@@ -292,9 +292,7 @@ zzz,yyy,xxx"#,
         let _ = pretty_env_logger::try_init();
 
         let parser = Parser::default();
-        let lines = parser.parse(b"aaa,bbb,ccc\r\nzzz,yyy,xxx");
-
-        assert_eq!(lines.index.terminators, vec![0x1800]);
+        let lines = parser.parse(b"\r\n\r\naaa,bbb,ccc\r\nzzz,yyy,xxx\r\n");
 
         assert_eq!(
             lines
