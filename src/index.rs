@@ -1,6 +1,6 @@
 //! The module provides data structures for indexing CSV data.
 
-use core::ops::{Deref, DerefMut, Range};
+use core::ops::{Deref, DerefMut, Range, RangeFrom};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -90,38 +90,16 @@ impl Index {
     }
 
     /// Returns the next line in the scope.
-    pub fn next_line(&self, mut span: Range<usize>) -> Option<Range<usize>> {
-        // skip the leading terminators
-        while span.start < span.end && self.is_terminator(span.start) {
-            span.start += 1
-        }
+    pub fn next_line(&self, span: RangeFrom<usize>) -> Option<Range<usize>> {
+        (span.start..self.len)
+            .find(|&pos| !self.is_terminator(pos)) // skip the leading terminators
+            .and_then(|pos| {
+                let span = pos..self.len;
 
-        if span.start == span.end {
-            None
-        } else {
-            loop {
-                match self.next_occurred(&self.terminators, &span) {
-                    Some(end) => {
-                        if end == span.start {
-                            span.start += 1;
-
-                            if span.start >= span.end {
-                                return None;
-                            }
-                        } else {
-                            return Some(span.start..end);
-                        }
-                    }
-                    None => {
-                        return if span.start >= span.end {
-                            None
-                        } else {
-                            Some(span)
-                        };
-                    }
-                }
-            }
-        }
+                self.next_occurred(&self.terminators, &span)
+                    .map(|end| pos..end)
+                    .or(Some(span))
+            })
     }
 
     /// Returns the next record in the scope.

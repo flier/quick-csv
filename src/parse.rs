@@ -239,28 +239,27 @@ impl<'a> Iterator for Lines<'a> {
         if self.pos >= self.inner.index.len {
             None
         } else {
-            self.inner
-                .index
-                .next_line(self.pos..self.inner.index.len)
-                .map(|span| {
-                    self.pos = span.end + 1;
-                    self.line += 1;
+            self.inner.index.next_line(self.pos..).map(|span| {
+                self.pos = span.end + 1;
+                self.line += 1;
 
-                    let line = Line {
-                        inner: self.inner.clone(),
-                        span,
-                        line: self.line,
-                    };
+                let line = Line {
+                    inner: self.inner.clone(),
+                    span,
+                    line: self.line,
+                };
 
-                    trace!(
-                        "line #{} @ {:?}: {}",
-                        line.line,
-                        line.span,
-                        line.to_str().unwrap()
-                    );
+                trace!(
+                    "line #{} @ {:?}: {}",
+                    line.line,
+                    line.span,
+                    line.to_str()
+                        .map(Cow::from)
+                        .unwrap_or_else(|_| format!("{:?}", line.as_ref()).into())
+                );
 
-                    line
-                })
+                line
+            })
         }
     }
 }
@@ -431,7 +430,10 @@ impl<'a> Iterator for Fields<'a> {
                 "  field #{} @ {:?}: {}",
                 field.column,
                 field.span,
-                field.to_str().unwrap()
+                field
+                    .to_str()
+                    .map(Cow::from)
+                    .unwrap_or_else(|_| format!("{:?}", field.as_ref()).into())
             );
 
             Some(field)
