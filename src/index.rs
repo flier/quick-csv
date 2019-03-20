@@ -98,7 +98,7 @@ impl Index {
 
                 self.next_occurred(&self.terminators, &span)
                     .map(|end| pos..end)
-                    .or(Some(span))
+                    .or_else(|| Some(span))
             })
     }
 

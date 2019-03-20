@@ -7,13 +7,13 @@
 pub type m256i = [u64; 4];
 
 pub fn mm256i(x: i8) -> m256i {
-    [(x as u8) as u64 * 0x0101_0101_0101_0101_u64; 4]
+    [u64::from(x as u8) * 0x0101_0101_0101_0101_u64; 4]
 }
 
 fn slice_to_u64(s: &[u8]) -> u64 {
     let mut res = 0_u64;
-    for (i, x) in s[0..8].iter().enumerate() {
-        res |= (*x as u64) << ((7 - i) * 8);
+    for (i, &x) in s[0..8].iter().enumerate() {
+        res |= u64::from(x) << ((7 - i) * 8);
     }
     res
 }
@@ -31,7 +31,7 @@ pub unsafe fn u8_to_m256i(s: &[u8], i: usize) -> m256i {
 pub unsafe fn u8_to_m256i_rest(s: &[u8], i: usize) -> m256i {
     let mut result = [0_u64; 4];
     for x in i..s.len() {
-        result[(x - i) / 8] |= (s[x] as u64) << ((7 - ((x - i) & 7)) * 8);
+        result[(x - i) / 8] |= u64::from(s[x]) << ((7 - ((x - i) & 7)) * 8);
     }
     result
 }
