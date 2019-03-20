@@ -15,7 +15,8 @@ cfg_if! {
 }
 
 mod avx;
-pub mod index;
+mod index;
 mod parser;
 
-pub use parser::{Builder, Escaped, Line, Lines, Parser};
+pub use index::Index;
+pub use parser::{parse, Builder, Escaped, Line, Lines, Parsed, Parser, Record, Records};

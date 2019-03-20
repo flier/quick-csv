@@ -2,10 +2,15 @@ use alloc::borrow::Cow;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
-use core::ops::{Deref, Range};
+use core::iter::IntoIterator;
+use core::ops::Range;
 use core::str;
 
 use crate::index::{Builder as IndexBuilder, Index, COMMA, QUOTE};
+
+pub fn parse(buf: &[u8]) -> Parsed {
+    Parser::default().parse(buf)
+}
 
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -89,7 +94,7 @@ impl Default for Parser {
 }
 
 impl Parser {
-    pub fn parse<'a>(&self, buf: &'a [u8]) -> Lines<'a> {
+    pub fn parse<'a>(&self, buf: &'a [u8]) -> Parsed<'a> {
         let mut index_builder = IndexBuilder::with_capacity(buf.len());
 
         if self.delimiter != COMMA {
@@ -111,14 +116,218 @@ impl Parser {
 
         index_builder.build(buf);
 
-        Lines {
+        Parsed {
             inner: Rc::new(Inner {
                 buf,
                 index: index_builder.finalize(),
                 comment: self.comment,
             }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Inner<'a> {
+    buf: &'a [u8],
+    index: Index,
+    comment: Option<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Parsed<'a> {
+    inner: Rc<Inner<'a>>,
+}
+
+impl<'a> AsRef<[u8]> for Parsed<'a> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.inner.buf
+    }
+}
+
+impl<'a> Parsed<'a> {
+    pub fn index(&self) -> &Index {
+        &self.inner.index
+    }
+
+    pub fn lines(&self) -> Lines<'a> {
+        Lines {
+            inner: self.inner.clone(),
             line: 0,
             pos: 0,
+        }
+    }
+}
+
+impl<'a> IntoIterator for Parsed<'a> {
+    type Item = Line<'a>;
+    type IntoIter = Lines<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.lines()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Lines<'a> {
+    inner: Rc<Inner<'a>>,
+    line: usize,
+    pos: usize,
+}
+
+impl<'a> Lines<'a> {
+    #[inline]
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    #[inline]
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = Line<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.inner.index.len {
+            None
+        } else {
+            self.inner
+                .index
+                .next_line(self.pos..self.inner.index.len)
+                .map(|span| {
+                    trace!("found line @ {:?}", span);
+
+                    self.pos = span.end + 1;
+                    self.line += 1;
+
+                    Line {
+                        inner: self.inner.clone(),
+                        span,
+                        line: self.line,
+                    }
+                })
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Line<'a> {
+    inner: Rc<Inner<'a>>,
+    span: Range<usize>,
+    line: usize,
+}
+
+impl<'a> AsRef<[u8]> for Line<'a> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.inner.buf[self.span.start..self.span.end]
+    }
+}
+
+impl<'a> IntoIterator for Line<'a> {
+    type Item = Record<'a>;
+    type IntoIter = Records<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.records()
+    }
+}
+
+impl<'a> Line<'a> {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.span.len() == 0
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.span.len()
+    }
+
+    #[inline]
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    #[inline]
+    pub fn span(&self) -> Range<usize> {
+        self.span.clone()
+    }
+
+    #[inline]
+    pub fn is_comment(&self) -> bool {
+        self.as_ref().first().cloned() == self.inner.comment
+    }
+
+    #[inline]
+    pub fn as_comment(&self) -> Option<Result<&str, str::Utf8Error>> {
+        if self.is_comment() {
+            self.as_ref()
+                .split_first()
+                .map(|(_, comment)| str::from_utf8(comment))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+        str::from_utf8(self.as_ref())
+    }
+
+    #[inline]
+    pub fn records(&self) -> Records<'a> {
+        Records {
+            inner: self.inner.clone(),
+            span: self.span.clone(),
+            column: 0,
+            pos: self.span.start,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Records<'a> {
+    inner: Rc<Inner<'a>>,
+    span: Range<usize>,
+    column: usize,
+    pos: usize,
+}
+
+impl<'a> Records<'a> {
+    #[inline]
+    pub fn column(&self) -> usize {
+        self.column
+    }
+
+    #[inline]
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+}
+
+impl<'a> Iterator for Records<'a> {
+    type Item = Record<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.span.end {
+            None
+        } else {
+            let span = self.inner.index.next_record(self.pos..self.span.end);
+
+            trace!("found record @ {:?}", span);
+
+            self.pos = span.end + 1;
+            self.column += 1;
+
+            Some(Record {
+                inner: self.inner.clone(),
+                span,
+                column: self.column,
+            })
         }
     }
 }
@@ -141,6 +350,11 @@ impl<'a> Record<'a> {
     #[inline]
     pub fn column(&self) -> usize {
         self.column
+    }
+
+    #[inline]
+    pub fn span(&self) -> Range<usize> {
+        self.span.clone()
     }
 
     #[inline]
@@ -203,153 +417,6 @@ impl<'a> Escaped<'a> for [u8] {
         span: Range<usize>,
     ) -> Result<Cow<'a, [u8]>, Self::Error> {
         Ok(unescape_bytes(buf, index, span))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Line<'a> {
-    inner: Rc<Inner<'a>>,
-    span: Range<usize>,
-    line: usize,
-    column: usize,
-    pos: usize,
-}
-
-impl<'a> Iterator for Line<'a> {
-    type Item = Record<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.span.end {
-            None
-        } else {
-            let span = self.inner.index.next_record(self.pos..self.span.end);
-
-            trace!("found record @ {:?}", span);
-
-            self.pos = span.end + 1;
-            self.column += 1;
-
-            Some(Record {
-                inner: self.inner.clone(),
-                span,
-                column: self.column,
-            })
-        }
-    }
-}
-
-impl<'a> AsRef<[u8]> for Line<'a> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        &self.inner.buf[self.span.start..self.span.end]
-    }
-}
-
-impl<'a> Line<'a> {
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.span.len() == 0
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.span.len()
-    }
-
-    #[inline]
-    pub fn line(&self) -> usize {
-        self.line
-    }
-
-    #[inline]
-    pub fn is_comment(&self) -> bool {
-        self.as_ref().first().cloned() == self.inner.comment
-    }
-
-    #[inline]
-    pub fn as_comment(&self) -> Option<Result<&str, str::Utf8Error>> {
-        if self.is_comment() {
-            self.as_ref()
-                .split_first()
-                .map(|(_, comment)| str::from_utf8(comment))
-        } else {
-            None
-        }
-    }
-
-    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
-        str::from_utf8(self.as_ref())
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Lines<'a> {
-    inner: Rc<Inner<'a>>,
-    line: usize,
-    pos: usize,
-}
-
-#[derive(Debug)]
-struct Inner<'a> {
-    buf: &'a [u8],
-    index: Index,
-    comment: Option<u8>,
-}
-
-impl<'a> AsRef<[u8]> for Lines<'a> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        self.inner.buf
-    }
-}
-
-impl<'a> Deref for Lines<'a> {
-    type Target = Index;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.inner.index
-    }
-}
-
-impl<'a> Iterator for Lines<'a> {
-    type Item = Line<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.inner.index.len {
-            None
-        } else {
-            self.inner
-                .index
-                .next_line(self.pos..self.inner.index.len)
-                .map(|span| {
-                    trace!("found line @ {:?}", span);
-
-                    let pos = span.start;
-                    self.pos = span.end + 1;
-                    self.line += 1;
-
-                    Line {
-                        inner: self.inner.clone(),
-                        span,
-                        line: self.line,
-                        column: 0,
-                        pos,
-                    }
-                })
-        }
-    }
-}
-
-impl<'a> Lines<'a> {
-    #[inline]
-    pub fn line(&self) -> usize {
-        self.line
-    }
-
-    #[inline]
-    pub fn index(&self) -> &Index {
-        &self.inner.index
     }
 }
 
@@ -501,19 +568,18 @@ mod tests {
     fn test_parse_lines() {
         let _ = pretty_env_logger::try_init();
 
-        let parser = Parser::default();
-        let lines = parser.parse(
-            br#""aaa","b
+        assert_eq!(
+            parse(
+                br#""aaa","b
 bb","ccc"
 zzz,yyy,xxx"#,
-        );
-
-        assert_eq!(
-            lines
-                .map(|line| line
-                    .map(|record| record.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>())
-                .collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|line| line
+                .into_iter()
+                .map(|record| record.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
             vec![
                 vec!["\"aaa\"", "\"b\nbb\"", "\"ccc\""],
                 vec!["zzz", "yyy", "xxx"]
@@ -525,12 +591,11 @@ zzz,yyy,xxx"#,
     fn test_parse_line_with_crlf() {
         let _ = pretty_env_logger::try_init();
 
-        let parser = Parser::default();
-        let lines = parser.parse(b"\r\n\r\naaa,bbb,ccc\r\nzzz,yyy,xxx\r\n");
-
         assert_eq!(
-            lines
+            parse(b"\r\n\r\naaa,bbb,ccc\r\nzzz,yyy,xxx\r\n")
+                .into_iter()
                 .map(|line| line
+                    .into_iter()
                     .map(|record| record.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
@@ -542,18 +607,18 @@ zzz,yyy,xxx"#,
     fn test_parse_double_quote() {
         let _ = pretty_env_logger::try_init();
 
-        let s = br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#;
+        let csv = parse(br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#);
 
         assert_eq!(
-            Parser::default().parse(s)
-                .flat_map(|line| line
+            csv.lines()
+                .flat_map(|line| line.into_iter()
                     .map(|record| record.unescaped::<[u8]>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec![&b"aaa"[..], &b"b\"b\"b"[..], &b"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"[..]]
         );
         assert_eq!(
-            Parser::default().parse(s)
-                .flat_map(|line| line
+            csv.lines()
+                .flat_map(|line| line.into_iter()
                     .map(|record| record.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"b\"b", "0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"]
@@ -565,11 +630,13 @@ zzz,yyy,xxx"#,
         let _ = pretty_env_logger::try_init();
 
         let parser = Builder::default().with_delimiter(b'\t').build();
-        let lines = parser.parse(b"aaa\tbbb\tccc\nzzz\tyyy\txxx");
+        let parsed = parser.parse(b"aaa\tbbb\tccc\nzzz\tyyy\txxx");
 
         assert_eq!(
-            lines
+            parsed
+                .into_iter()
                 .map(|line| line
+                    .into_iter()
                     .map(|record| record.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
@@ -582,14 +649,16 @@ zzz,yyy,xxx"#,
         let _ = pretty_env_logger::try_init();
 
         let parser = Builder::default().with_comment(b'#').build();
-        let lines = parser.parse(b"#some comment\naaa,bbb,ccc\nzzz,yyy,xxx");
+        let parsed = parser.parse(b"#some comment\naaa,bbb,ccc\nzzz,yyy,xxx");
 
         assert_eq!(
-            lines
+            parsed
+                .into_iter()
                 .map(|line| if let Some(comment) = line.as_comment() {
                     vec![comment.unwrap().to_owned()]
                 } else {
-                    line.map(|record| record.as_str().unwrap().to_owned())
+                    line.records()
+                        .map(|record| record.as_str().unwrap().to_owned())
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>(),
@@ -608,9 +677,11 @@ zzz,yyy,xxx"#,
         let s = b"aaa,b\"\"bb,ccc\nzzz,yyy,xxx";
 
         assert_eq!(
-            Parser::default()
-                .parse(s)
-                .flat_map(|line| line.map(|record| record.unescaped::<str>().unwrap().into_owned()))
+            parse(s)
+                .into_iter()
+                .flat_map(|line| line
+                    .into_iter()
+                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -620,7 +691,10 @@ zzz,yyy,xxx"#,
                 .without_double_quote()
                 .build()
                 .parse(s)
-                .flat_map(|line| line.map(|record| record.unescaped::<str>().unwrap().into_owned()))
+                .into_iter()
+                .flat_map(|line| line
+                    .into_iter()
+                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -633,9 +707,11 @@ zzz,yyy,xxx"#,
         let s = b"aaa,\"b\nbb\",ccc\nzzz,yyy,xxx";
 
         assert_eq!(
-            Parser::default()
-                .parse(s)
-                .flat_map(|line| line.map(|record| record.as_str().unwrap().to_owned()))
+            parse(s)
+                .into_iter()
+                .flat_map(|line| line
+                    .into_iter()
+                    .map(|record| record.as_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b\nbb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -645,7 +721,10 @@ zzz,yyy,xxx"#,
                 .without_quoting()
                 .build()
                 .parse(s)
-                .flat_map(|line| line.map(|record| record.as_str().unwrap().to_owned()))
+                .into_iter()
+                .flat_map(|line| line
+                    .into_iter()
+                    .map(|record| record.as_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b", "bb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -662,16 +741,19 @@ zzz,yyy,xxx"#,
             .encode("测试,你好,世界", encoding::EncoderTrap::Ignore)
             .unwrap();
 
-        assert!(Parser::default()
-            .parse(s.as_slice())
-            .flat_map(|line| line.map(|record| record.as_str().map(|s| s.to_owned())))
+        assert!(parse(s.as_slice())
+            .into_iter()
+            .flat_map(|line| line
+                .into_iter()
+                .map(|record| record.as_str().map(|s| s.to_owned())))
             .collect::<Result<Vec<_>, str::Utf8Error>>()
             .is_err());
 
         assert_eq!(
             Parser::default()
                 .parse(s.as_slice())
-                .flat_map(|line| line.map(|record| record
+                .into_iter()
+                .flat_map(|line| line.into_iter().map(|record| record
                     .unescape_string(encoding::all::GBK, encoding::DecoderTrap::Ignore)))
                 .collect::<Result<Vec<_>, encoding::CodecError>>()
                 .map_err(|_| ())
