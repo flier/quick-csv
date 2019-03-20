@@ -149,7 +149,7 @@ impl Index {
                 len += b.trailing_zeros() as usize;
             }
 
-            if off == end {
+            if off == end && end < index.len() {
                 b = index[end] & ((1 << (span.end % 64)) - 1);
 
                 len += (span.end % 64).min(b.trailing_zeros() as usize)

@@ -12,10 +12,15 @@ codec = ["encoding", "std"]
 [dependencies]
 log = "0.4"
 cfg-if = "0.1"
-csv-core = "0.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
 encoding = { version = "0.2", optional = true }
 
 [dev-dependencies]
 pretty_env_logger = "0.3"
 serde_json = "1.0"
+criterion = "0.2"
+csv-core = "0.1"
+
+[[bench]]
+name = "parse"
+harness = false
