@@ -1,22 +1,26 @@
 #[cfg(target_arch = "x86")]
-use core::arch::x86::*;
+pub use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
+pub use core::arch::x86_64::*;
+
+pub use self::__m256i as m256i;
 
 #[inline]
-pub unsafe fn mm256i(i: i8) -> __m256i {
-    _mm256_setr_epi8(
-        i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i,
-        i, i,
-    )
+pub fn mm256i(i: i8) -> m256i {
+    unsafe {
+        _mm256_setr_epi8(
+            i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i,
+            i, i, i,
+        )
+    }
 }
 
-/// Create a value of `__m256i` from the slice of bytes.
+/// Create a value of `m256i` from the slice of bytes.
 ///
 /// # Safety
 /// This function guarantees the safety only if the length of `s` is greater than or equal to `i + 32`.
 #[inline(always)]
-pub unsafe fn u8_to_m256i(s: &[u8], i: usize) -> __m256i {
+pub unsafe fn u8_to_m256i(s: &[u8], i: usize) -> m256i {
     _mm256_setr_epi8(
         *s.as_ptr().add(i) as i8,
         *s.as_ptr().add(i + 1) as i8,
@@ -54,7 +58,7 @@ pub unsafe fn u8_to_m256i(s: &[u8], i: usize) -> __m256i {
 }
 
 #[inline]
-pub unsafe fn u8_to_m256i_rest(s: &[u8], i: usize) -> __m256i {
+pub unsafe fn u8_to_m256i_rest(s: &[u8], i: usize) -> m256i {
     match s.len() - i {
         31 => _mm256_setr_epi8(
             *s.as_ptr().add(i) as i8,

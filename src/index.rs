@@ -1,9 +1,5 @@
 //! The module provides data structures for indexing CSV data.
 
-#[cfg(target_arch = "x86")]
-use core::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
 use core::ops::{Deref, DerefMut, Range};
 
 #[cfg(not(feature = "std"))]
@@ -12,7 +8,10 @@ use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_feature = "avx")]
 use crate::avx::*;
+#[cfg(not(target_feature = "avx"))]
+use crate::emulated::*;
 
 pub(crate) const COMMA: u8 = b',';
 pub(crate) const QUOTE: u8 = b'"';
@@ -187,14 +186,14 @@ impl Index {
 #[derive(Debug)]
 pub struct Builder {
     /// The delimiter that separates fields.
-    delimiter: __m256i,
+    delimiter: m256i,
     /// The quotation byte.
-    quote: Option<__m256i>,
+    quote: Option<m256i>,
     /// The terminator that separates records.
-    terminator: Option<__m256i>,
+    terminator: Option<m256i>,
 
-    cr: __m256i,
-    lf: __m256i,
+    cr: m256i,
+    lf: m256i,
 
     /// Whether to recognized doubled quotes.
     double_quote: bool,
@@ -231,11 +230,11 @@ impl Builder {
     /// Creates a new empty `Index` with a particular capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Builder {
-            delimiter: unsafe { mm256i(COMMA as i8) },
-            quote: Some(unsafe { mm256i(QUOTE as i8) }),
+            delimiter: mm256i(COMMA as i8),
+            quote: Some(mm256i(QUOTE as i8)),
             terminator: None,
-            cr: unsafe { mm256i(CR as i8) },
-            lf: unsafe { mm256i(LF as i8) },
+            cr: mm256i(CR as i8),
+            lf: mm256i(LF as i8),
             double_quote: true,
             index: Index::with_capacity(capacity),
         }
@@ -245,7 +244,7 @@ impl Builder {
     ///
     /// The default is `b','`.
     pub fn with_delimiter(&mut self, delimiter: u8) -> &mut Self {
-        self.delimiter = unsafe { mm256i(delimiter as i8) };
+        self.delimiter = mm256i(delimiter as i8);
         self
     }
 
@@ -253,7 +252,7 @@ impl Builder {
     ///
     /// The default is `b'"'`.
     pub fn with_quote(&mut self, quote: u8) -> &mut Self {
-        self.quote = Some(unsafe { mm256i(quote as i8) });
+        self.quote = Some(mm256i(quote as i8));
         self
     }
 
@@ -267,7 +266,7 @@ impl Builder {
     ///
     /// A record terminator can be any single byte. The default is `b"\r\n"`.
     pub fn with_terminator(&mut self, terminator: u8) -> &mut Self {
-        self.terminator = Some(unsafe { mm256i(terminator as i8) });
+        self.terminator = Some(mm256i(terminator as i8));
         self
     }
 
@@ -451,14 +450,14 @@ impl Builder {
 }
 
 #[inline(always)]
-unsafe fn mbitmap(s1: &__m256i, s2: &__m256i, m: &__m256i) -> u64 {
+unsafe fn mbitmap(s1: &m256i, s2: &m256i, m: &m256i) -> u64 {
     let i1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(*s1, *m));
     let i2 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(*s2, *m));
     u64::from(i1 as u32) | (u64::from(i2 as u32) << 32)
 }
 
 #[inline(always)]
-unsafe fn mbitmap_partial(s: &__m256i, m: &__m256i) -> u64 {
+unsafe fn mbitmap_partial(s: &m256i, m: &m256i) -> u64 {
     u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(*s, *m)) as u32)
 }
 
