@@ -1,3 +1,5 @@
+//! The module provides data structures for indexing CSV data.
+
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
@@ -12,11 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::avx::*;
 
-pub const COMMA: u8 = b',';
-pub const QUOTE: u8 = b'"';
-pub const CR: u8 = b'\r';
-pub const LF: u8 = b'\n';
+pub(crate) const COMMA: u8 = b',';
+pub(crate) const QUOTE: u8 = b'"';
+pub(crate) const CR: u8 = b'\r';
+pub(crate) const LF: u8 = b'\n';
 
+/// Build the index with input.
 pub fn build(buf: &[u8]) -> Index {
     let mut b = Builder::default();
 
@@ -24,17 +27,24 @@ pub fn build(buf: &[u8]) -> Index {
     b.finalize()
 }
 
+/// The index for access to CSV records.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Default, PartialEq)]
 pub struct Index {
+    /// The bitmap of delimiter that separates fields.
     pub delimiters: Vec<u64>,
+    /// The bitmap of quote character that encloses field.
     pub quotes: Vec<u64>,
+    /// The bitmap of terminator that separates records.
     pub terminators: Vec<u64>,
+    /// The bitmap of escape character that escapes quotes.
     pub escapes: Option<Vec<u64>>,
+    /// The size of input.
     pub len: usize,
 }
 
 impl Index {
+    /// Creates a new empty `Index` with a particular capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = (capacity + 63) / 64;
 
@@ -47,6 +57,7 @@ impl Index {
         }
     }
 
+    /// Truncates this `Index`, removing all contents.
     pub fn clear(&mut self) {
         self.delimiters.clear();
         self.quotes.clear();
@@ -55,24 +66,28 @@ impl Index {
         self.len = 0;
     }
 
+    /// Returns true if this `byte` is a delimiter, and false if not.
     pub fn is_delimiter(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
         (self.delimiters[pos / 64] & (1 << (pos % 64))) != 0
     }
 
+    /// Returns true if this `byte` is a quote, and false if not.
     pub fn is_quote(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
         (self.quotes[pos / 64] & (1 << (pos % 64))) != 0
     }
 
+    /// Returns true if this `byte` is a terminator, and false if not.
     pub fn is_terminator(&self, pos: usize) -> bool {
         debug_assert!(pos <= self.len, "pos={}, len={}", pos, self.len);
 
         (self.terminators[pos / 64] & (1 << (pos % 64))) != 0
     }
 
+    /// Returns the next line in the scope.
     pub fn next_line(&self, mut span: Range<usize>) -> Option<Range<usize>> {
         // skip the leading terminators
         while span.start < span.end && self.is_terminator(span.start) {
@@ -107,7 +122,8 @@ impl Index {
         }
     }
 
-    pub fn next_record(&self, span: Range<usize>) -> Range<usize> {
+    /// Returns the next record in the scope.
+    pub fn next_field(&self, span: Range<usize>) -> Range<usize> {
         let end = self
             .next_occurred(&self.delimiters, &span)
             .unwrap_or(span.end);
@@ -115,6 +131,7 @@ impl Index {
         span.start..end
     }
 
+    /// Returns the next escape char in the scope.
     pub fn next_escape(&self, span: Range<usize>) -> Option<usize> {
         self.escapes
             .as_ref()
@@ -166,6 +183,7 @@ impl Index {
     }
 }
 
+/// A builder used to create `Index` in various manners.
 #[derive(Debug)]
 pub struct Builder {
     /// The delimiter that separates fields.
@@ -205,10 +223,12 @@ impl DerefMut for Builder {
 }
 
 impl Builder {
+    /// Creates a new empty `Index`.
     pub fn new() -> Self {
         Builder::with_capacity(16)
     }
 
+    /// Creates a new empty `Index` with a particular capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Builder {
             delimiter: unsafe { mm256i(COMMA as i8) },
@@ -221,31 +241,48 @@ impl Builder {
         }
     }
 
+    /// The field delimiter to use when parsing CSV.
+    ///
+    /// The default is `b','`.
     pub fn with_delimiter(&mut self, delimiter: u8) -> &mut Self {
         self.delimiter = unsafe { mm256i(delimiter as i8) };
         self
     }
+
+    /// The quote character to use when parsing CSV.
+    ///
+    /// The default is `b'"'`.
     pub fn with_quote(&mut self, quote: u8) -> &mut Self {
         self.quote = Some(unsafe { mm256i(quote as i8) });
         self
     }
+
+    /// Disable quoting.
     pub fn without_quote(&mut self) -> &mut Self {
         self.quote = None;
         self
     }
+
+    /// The record terminator to use when parsing CSV.
+    ///
+    /// A record terminator can be any single byte. The default is `b"\r\n"`.
     pub fn with_terminator(&mut self, terminator: u8) -> &mut Self {
         self.terminator = Some(unsafe { mm256i(terminator as i8) });
         self
     }
+
+    /// Disable double quote escapes.
     pub fn without_double_quote(&mut self) -> &mut Self {
         self.double_quote = false;
         self
     }
 
+    /// Finalize the `Index`.
     pub fn finalize(self) -> Index {
         self.index
     }
 
+    /// Build the index with input.
     pub fn build(&mut self, buf: &[u8]) {
         trace!(
             "build index with {} bytes, indexed {} bytes",
@@ -360,11 +397,6 @@ impl Builder {
 
     #[inline]
     fn build_structural_quote_bitmap(&mut self) -> Vec<u64> {
-        trace!(
-            "build_structural_quote_bitmap with {} quotes",
-            self.index.quotes.len()
-        );
-
         let len = self.index.quotes.len();
         let mut escapes = Vec::with_capacity(len);
 
@@ -388,11 +420,6 @@ impl Builder {
 
     #[inline]
     fn build_structural_line_bitmap(&mut self) {
-        trace!(
-            "build_structural_line_bitmap with {} terminators",
-            self.index.terminators.len()
-        );
-
         let mut quote_count = 0;
 
         for (i, b) in self.index.terminators.iter_mut().enumerate() {

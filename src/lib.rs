@@ -1,5 +1,8 @@
+//! CSV parser which picks up values directly without performing tokenization
+
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), feature(alloc))]
+#![deny(missing_docs)]
 
 #[macro_use]
 extern crate log;
@@ -18,5 +21,8 @@ mod avx;
 pub mod index;
 mod parser;
 
+#[doc(inline)]
 pub use index::{build, Index};
-pub use parser::{parse, Builder, Escaped, Line, Lines, Parsed, Parser, Record, Records};
+pub use parser::{
+    parse, Builder, Escaped, Field, Fields, Line, Lines, Parsed, Parser, Record, Records,
+};

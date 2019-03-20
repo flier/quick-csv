@@ -1,3 +1,5 @@
+//! The module provides data structures for parsing CSV data.
+
 use alloc::borrow::Cow;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -8,16 +10,19 @@ use core::str;
 
 use crate::index::{Builder as IndexBuilder, Index, COMMA, QUOTE};
 
+/// Parse CSV data into a `Parsed`.
 pub fn parse(buf: &[u8]) -> Parsed {
     Parser::default().parse(buf)
 }
 
+/// A builder used to create `Parser` in various manners.
 #[derive(Debug, Default)]
 pub struct Builder {
     parser: Parser,
 }
 
 impl Builder {
+    /// Build the `Parser`.
     pub fn build(self) -> Parser {
         self.parser
     }
@@ -31,6 +36,12 @@ impl Builder {
     /// The terminator that separates records.
     pub fn with_terminator(mut self, terminator: u8) -> Self {
         self.parser.terminator = Some(terminator);
+        self
+    }
+
+    /// The quotation byte.
+    pub fn with_quote(mut self, quote: u8) -> Self {
+        self.parser.quote = quote;
         self
     }
 
@@ -60,6 +71,7 @@ impl Builder {
     }
 }
 
+/// A `Parser` that parses the CSV input.
 #[derive(Debug)]
 pub struct Parser {
     /// The delimiter that separates fields.
@@ -94,6 +106,7 @@ impl Default for Parser {
 }
 
 impl Parser {
+    /// Parses this input slice in CSV format.
     pub fn parse<'a>(&self, buf: &'a [u8]) -> Parsed<'a> {
         let mut index_builder = IndexBuilder::with_capacity(buf.len());
 
@@ -133,6 +146,7 @@ struct Inner<'a> {
     comment: Option<u8>,
 }
 
+/// Parsed input with index.
 #[derive(Clone, Debug)]
 pub struct Parsed<'a> {
     inner: Rc<Inner<'a>>,
@@ -146,10 +160,15 @@ impl<'a> AsRef<[u8]> for Parsed<'a> {
 }
 
 impl<'a> Parsed<'a> {
+    /// The index of records and fields.
     pub fn index(&self) -> &Index {
         &self.inner.index
     }
 
+    /// An iterator over the lines of input.
+    ///
+    /// Lines are ended with either a newline (\n) or a carriage return with a line feed (\r\n).
+    /// The final line ending is optional.
     pub fn lines(&self) -> Lines<'a> {
         Lines {
             inner: self.inner.clone(),
@@ -158,6 +177,7 @@ impl<'a> Parsed<'a> {
         }
     }
 
+    /// An iterator over the records of input.
     pub fn records(&self) -> Records<'a> {
         Records(self.lines())
     }
@@ -172,6 +192,7 @@ impl<'a> IntoIterator for Parsed<'a> {
     }
 }
 
+/// An iterator over the records of input.
 #[derive(Clone, Debug)]
 pub struct Records<'a>(Lines<'a>);
 
@@ -189,6 +210,7 @@ impl<'a> Iterator for Records<'a> {
     }
 }
 
+/// An iterator over the lines of input.
 #[derive(Clone, Debug)]
 pub struct Lines<'a> {
     inner: Rc<Inner<'a>>,
@@ -197,11 +219,13 @@ pub struct Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
+    /// Returns the current line number.
     #[inline]
     pub fn line(&self) -> usize {
         self.line
     }
 
+    /// Returns the current position.
     #[inline]
     pub fn position(&self) -> usize {
         self.pos
@@ -219,21 +243,29 @@ impl<'a> Iterator for Lines<'a> {
                 .index
                 .next_line(self.pos..self.inner.index.len)
                 .map(|span| {
-                    trace!("found line @ {:?}", span);
-
                     self.pos = span.end + 1;
                     self.line += 1;
 
-                    Line {
+                    let line = Line {
                         inner: self.inner.clone(),
                         span,
                         line: self.line,
-                    }
+                    };
+
+                    trace!(
+                        "line #{} @ {:?}: {}",
+                        line.line,
+                        line.span,
+                        line.to_str().unwrap()
+                    );
+
+                    line
                 })
         }
     }
 }
 
+/// A record of input.
 #[derive(Clone, Debug)]
 pub struct Record<'a>(Line<'a>);
 
@@ -255,6 +287,7 @@ impl<'a> IntoIterator for Record<'a> {
 }
 
 impl<'a> Record<'a> {
+    /// An iterator over the fields of record.
     #[inline]
     pub fn fields(&self) -> Fields<'a> {
         Fields {
@@ -266,6 +299,7 @@ impl<'a> Record<'a> {
     }
 }
 
+/// A line of input.
 #[derive(Clone, Debug)]
 pub struct Line<'a> {
     inner: Rc<Inner<'a>>,
@@ -281,33 +315,39 @@ impl<'a> AsRef<[u8]> for Line<'a> {
 }
 
 impl<'a> Line<'a> {
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.span.len() == 0
-    }
-
+    /// Returns the number of bytes in the line.
     #[inline]
     pub fn len(&self) -> usize {
         self.span.len()
     }
 
+    /// Returns true if the line has a length of 0.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.span.len() == 0
+    }
+
+    /// Returns the line number.
     #[inline]
     pub fn line(&self) -> usize {
         self.line
     }
 
+    /// Returns the span for the `Line`.
     #[inline]
     pub fn span(&self) -> Range<usize> {
         self.span.clone()
     }
 
+    /// Returns true if this `Line` is a comment, and false if not.
     #[inline]
     pub fn is_comment(&self) -> bool {
         self.as_ref().first().cloned() == self.inner.comment
     }
 
+    /// Yields a `&str` slice if the `Line` contains a comment.
     #[inline]
-    pub fn as_comment(&self) -> Option<Result<&str, str::Utf8Error>> {
+    pub fn to_comment(&self) -> Option<Result<&str, str::Utf8Error>> {
         if self.is_comment() {
             self.as_ref()
                 .split_first()
@@ -317,13 +357,15 @@ impl<'a> Line<'a> {
         }
     }
 
+    /// Returns true if this `Line` is a record, and false if not.
     #[inline]
     pub fn is_record(&self) -> bool {
         !self.is_empty() && !self.is_comment()
     }
 
+    /// Yields a `Record` if the `Line` contains a record.
     #[inline]
-    pub fn as_record(&self) -> Option<Record> {
+    pub fn to_record(&self) -> Option<Record> {
         if self.is_record() {
             Some(Record(self.clone()))
         } else {
@@ -331,17 +373,20 @@ impl<'a> Line<'a> {
         }
     }
 
+    /// Converts a `Line` into a `Record`.
     #[inline]
     pub fn into_record(self) -> Record<'a> {
         Record(self)
     }
 
+    /// Yields a `&str` slice if the `Line` contains valid UTF-8.
     #[inline]
-    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+    pub fn to_str(&self) -> Result<&str, str::Utf8Error> {
         str::from_utf8(self.as_ref())
     }
 }
 
+/// An iterator over the fields of record.
 #[derive(Clone, Debug)]
 pub struct Fields<'a> {
     inner: Rc<Inner<'a>>,
@@ -351,11 +396,13 @@ pub struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
+    /// Returns the current column number.
     #[inline]
     pub fn column(&self) -> usize {
         self.column
     }
 
+    /// Returns the current position.
     #[inline]
     pub fn position(&self) -> usize {
         self.pos
@@ -369,22 +416,30 @@ impl<'a> Iterator for Fields<'a> {
         if self.pos >= self.span.end {
             None
         } else {
-            let span = self.inner.index.next_record(self.pos..self.span.end);
-
-            trace!("found field @ {:?}", span);
+            let span = self.inner.index.next_field(self.pos..self.span.end);
 
             self.pos = span.end + 1;
             self.column += 1;
 
-            Some(Field {
+            let field = Field {
                 inner: self.inner.clone(),
                 span,
                 column: self.column,
-            })
+            };
+
+            trace!(
+                "  field #{} @ {:?}: {}",
+                field.column,
+                field.span,
+                field.to_str().unwrap()
+            );
+
+            Some(field)
         }
     }
 }
 
+/// The `Field` of `Record`.
 #[derive(Clone, Debug)]
 pub struct Field<'a> {
     inner: Rc<Inner<'a>>,
@@ -400,26 +455,31 @@ impl<'a> AsRef<[u8]> for Field<'a> {
 }
 
 impl<'a> Field<'a> {
+    /// Returns the column number.
     #[inline]
     pub fn column(&self) -> usize {
         self.column
     }
 
+    /// Returns the span for the `Field`.
     #[inline]
     pub fn span(&self) -> Range<usize> {
         self.span.clone()
     }
 
+    /// Yields a `&str` slice if the `Field` contains valid UTF-8.
     #[inline]
-    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+    pub fn to_str(&self) -> Result<&str, str::Utf8Error> {
         str::from_utf8(self.as_ref())
     }
 
+    /// The unescaped data.
     #[inline]
     pub fn unescaped<T: Escaped<'a> + ?Sized>(&'a self) -> Result<T::Unescaped, T::Error> {
         T::unescape(self.inner.buf, &self.inner.index, self.span.clone())
     }
 
+    /// Unescape the data with special encoding.
     #[cfg(feature = "codec")]
     pub fn unescape_string(
         &self,
@@ -436,10 +496,14 @@ impl<'a> Field<'a> {
     }
 }
 
+/// Escaped field.
 pub trait Escaped<'a> {
+    /// The unescaped data.
     type Unescaped;
+    /// The `Error` in unescaping.
     type Error;
 
+    /// Unescape the data
     fn unescape(
         buf: &'a [u8],
         index: &Index,
@@ -630,7 +694,7 @@ zzz,yyy,xxx"#,
             .records()
             .map(|record| record
                 .fields()
-                .map(|field| field.as_str().unwrap().to_owned())
+                .map(|field| field.to_str().unwrap().to_owned())
                 .collect::<Vec<_>>())
             .collect::<Vec<_>>(),
             vec![
@@ -649,7 +713,7 @@ zzz,yyy,xxx"#,
                 .records()
                 .map(|record| record
                     .fields()
-                    .map(|field| field.as_str().unwrap().to_owned())
+                    .map(|field| field.to_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
@@ -690,7 +754,7 @@ zzz,yyy,xxx"#,
                 .records()
                 .map(|record| record
                     .fields()
-                    .map(|field| field.as_str().unwrap().to_owned())
+                    .map(|field| field.to_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
@@ -707,12 +771,12 @@ zzz,yyy,xxx"#,
         assert_eq!(
             parsed
                 .lines()
-                .map(|line| if let Some(comment) = line.as_comment() {
+                .map(|line| if let Some(comment) = line.to_comment() {
                     vec![comment.unwrap().to_owned()]
                 } else {
                     line.into_record()
                         .fields()
-                        .map(|field| field.as_str().unwrap().to_owned())
+                        .map(|field| field.to_str().unwrap().to_owned())
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>(),
@@ -765,7 +829,7 @@ zzz,yyy,xxx"#,
                 .records()
                 .flat_map(|record| record
                     .fields()
-                    .map(|field| field.as_str().unwrap().to_owned()))
+                    .map(|field| field.to_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b\nbb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -778,7 +842,7 @@ zzz,yyy,xxx"#,
                 .records()
                 .flat_map(|record| record
                     .fields()
-                    .map(|field| field.as_str().unwrap().to_owned()))
+                    .map(|field| field.to_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b", "bb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -799,7 +863,7 @@ zzz,yyy,xxx"#,
             .records()
             .flat_map(|record| record
                 .fields()
-                .map(|field| field.as_str().map(|s| s.to_owned())))
+                .map(|field| field.to_str().map(|s| s.to_owned())))
             .collect::<Result<Vec<_>, str::Utf8Error>>()
             .is_err());
 
@@ -814,5 +878,48 @@ zzz,yyy,xxx"#,
                 .unwrap(),
             vec!["测试", "你好", "世界"]
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_parse_files() {
+        use std::fs;
+        use std::path::Path;
+
+        let _ = pretty_env_logger::try_init();
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+
+        for &(filename, records, fields) in &[
+            ("smallpop-colon.csv", 14, 14),
+            ("smallpop-no-headers.csv", 0, 0),
+            ("smallpop.csv", 0, 0),
+            ("strange.csv", 0, 0),
+            ("uspop-latin1.csv", 0, 0),
+            ("uspop-null.csv", 0, 0),
+            ("uspop.csv", 0, 0),
+            ("bench/game.csv", 100000, 600000),
+            ("bench/gtfs-mbta-stop-times.csv", 0, 0),
+            ("bench/nfl.csv", 0, 0),
+            ("bench/worldcitiespop.csv", 0, 0),
+        ] {
+            let data = fs::read(dir.join(filename)).unwrap();
+
+            trace!("read {} bytes from {}", data.len(), filename);
+
+            assert_eq!(
+                parse(data.as_slice())
+                    .records()
+                    .fold((0, 0), |(records, fields), record| (
+                        records + 1,
+                        fields + record.fields().count()
+                    )),
+                (records, fields),
+                "{} should have {} records and {} fields",
+                filename,
+                records,
+                fields
+            );
+        }
     }
 }
