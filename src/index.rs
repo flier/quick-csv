@@ -7,6 +7,9 @@ use core::ops::{Deref, DerefMut, Range};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::avx::*;
 
 pub const COMMA: u8 = b',';
@@ -14,6 +17,14 @@ pub const QUOTE: u8 = b'"';
 pub const CR: u8 = b'\r';
 pub const LF: u8 = b'\n';
 
+pub fn build(buf: &[u8]) -> Index {
+    let mut b = Builder::default();
+
+    b.build(buf);
+    b.finalize()
+}
+
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Default, PartialEq)]
 pub struct Index {
     pub delimiters: Vec<u64>,
@@ -502,5 +513,19 @@ zzz,yyy,xxx"#,
         b.build_structural_line_bitmap();
 
         assert_eq!(b.terminators, vec![0x0004_0000]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serde() {
+        let index = build(b"aaa,bbb,ccc");
+        let s = serde_json::to_string(&index).unwrap();
+
+        assert_eq!(
+            s,
+            "{\"delimiters\":[136],\"quotes\":[0],\"terminators\":[0],\"escapes\":[0],\"len\":11}"
+        );
+
+        assert_eq!(serde_json::from_str::<Index>(&s).unwrap(), index);
     }
 }
