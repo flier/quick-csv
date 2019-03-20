@@ -3,7 +3,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use core::iter::IntoIterator;
-use core::ops::Range;
+use core::ops::{Deref, Range};
 use core::str;
 
 use crate::index::{Builder as IndexBuilder, Index, COMMA, QUOTE};
@@ -157,14 +157,35 @@ impl<'a> Parsed<'a> {
             pos: 0,
         }
     }
+
+    pub fn records(&self) -> Records<'a> {
+        Records(self.lines())
+    }
 }
 
 impl<'a> IntoIterator for Parsed<'a> {
-    type Item = Line<'a>;
-    type IntoIter = Lines<'a>;
+    type Item = Record<'a>;
+    type IntoIter = Records<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.lines()
+        self.records()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Records<'a>(Lines<'a>);
+
+impl<'a> Iterator for Records<'a> {
+    type Item = Record<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(line) = self.0.next() {
+            if line.is_record() {
+                return Some(line.into_record());
+            }
+        }
+
+        None
     }
 }
 
@@ -214,6 +235,38 @@ impl<'a> Iterator for Lines<'a> {
 }
 
 #[derive(Clone, Debug)]
+pub struct Record<'a>(Line<'a>);
+
+impl<'a> Deref for Record<'a> {
+    type Target = Line<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for Record<'a> {
+    type Item = Field<'a>;
+    type IntoIter = Fields<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields()
+    }
+}
+
+impl<'a> Record<'a> {
+    #[inline]
+    pub fn fields(&self) -> Fields<'a> {
+        Fields {
+            inner: self.0.inner.clone(),
+            span: self.0.span.clone(),
+            column: 0,
+            pos: self.0.span.start,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Line<'a> {
     inner: Rc<Inner<'a>>,
     span: Range<usize>,
@@ -224,15 +277,6 @@ impl<'a> AsRef<[u8]> for Line<'a> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.inner.buf[self.span.start..self.span.end]
-    }
-}
-
-impl<'a> IntoIterator for Line<'a> {
-    type Item = Record<'a>;
-    type IntoIter = Records<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.records()
     }
 }
 
@@ -274,30 +318,39 @@ impl<'a> Line<'a> {
     }
 
     #[inline]
-    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
-        str::from_utf8(self.as_ref())
+    pub fn is_record(&self) -> bool {
+        !self.is_empty() && !self.is_comment()
     }
 
     #[inline]
-    pub fn records(&self) -> Records<'a> {
-        Records {
-            inner: self.inner.clone(),
-            span: self.span.clone(),
-            column: 0,
-            pos: self.span.start,
+    pub fn as_record(&self) -> Option<Record> {
+        if self.is_record() {
+            Some(Record(self.clone()))
+        } else {
+            None
         }
+    }
+
+    #[inline]
+    pub fn into_record(self) -> Record<'a> {
+        Record(self)
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
+        str::from_utf8(self.as_ref())
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct Records<'a> {
+pub struct Fields<'a> {
     inner: Rc<Inner<'a>>,
     span: Range<usize>,
     column: usize,
     pos: usize,
 }
 
-impl<'a> Records<'a> {
+impl<'a> Fields<'a> {
     #[inline]
     pub fn column(&self) -> usize {
         self.column
@@ -309,8 +362,8 @@ impl<'a> Records<'a> {
     }
 }
 
-impl<'a> Iterator for Records<'a> {
-    type Item = Record<'a>;
+impl<'a> Iterator for Fields<'a> {
+    type Item = Field<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos >= self.span.end {
@@ -318,12 +371,12 @@ impl<'a> Iterator for Records<'a> {
         } else {
             let span = self.inner.index.next_record(self.pos..self.span.end);
 
-            trace!("found record @ {:?}", span);
+            trace!("found field @ {:?}", span);
 
             self.pos = span.end + 1;
             self.column += 1;
 
-            Some(Record {
+            Some(Field {
                 inner: self.inner.clone(),
                 span,
                 column: self.column,
@@ -333,20 +386,20 @@ impl<'a> Iterator for Records<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Record<'a> {
+pub struct Field<'a> {
     inner: Rc<Inner<'a>>,
     span: Range<usize>,
     column: usize,
 }
 
-impl<'a> AsRef<[u8]> for Record<'a> {
+impl<'a> AsRef<[u8]> for Field<'a> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.inner.buf[self.span.start..self.span.end]
     }
 }
 
-impl<'a> Record<'a> {
+impl<'a> Field<'a> {
     #[inline]
     pub fn column(&self) -> usize {
         self.column
@@ -574,10 +627,10 @@ mod tests {
 bb","ccc"
 zzz,yyy,xxx"#,
             )
-            .into_iter()
-            .map(|line| line
-                .into_iter()
-                .map(|record| record.as_str().unwrap().to_owned())
+            .records()
+            .map(|record| record
+                .fields()
+                .map(|field| field.as_str().unwrap().to_owned())
                 .collect::<Vec<_>>())
             .collect::<Vec<_>>(),
             vec![
@@ -593,10 +646,10 @@ zzz,yyy,xxx"#,
 
         assert_eq!(
             parse(b"\r\n\r\naaa,bbb,ccc\r\nzzz,yyy,xxx\r\n")
-                .into_iter()
-                .map(|line| line
-                    .into_iter()
-                    .map(|record| record.as_str().unwrap().to_owned())
+                .records()
+                .map(|record| record
+                    .fields()
+                    .map(|field| field.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
@@ -610,16 +663,16 @@ zzz,yyy,xxx"#,
         let csv = parse(br#""aaa","b""b""b","0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""0123456789""#);
 
         assert_eq!(
-            csv.lines()
-                .flat_map(|line| line.into_iter()
-                    .map(|record| record.unescaped::<[u8]>().unwrap().into_owned()))
+            csv.records()
+                .flat_map(|record| record.fields()
+                    .map(|field| field.unescaped::<[u8]>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec![&b"aaa"[..], &b"b\"b\"b"[..], &b"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"[..]]
         );
         assert_eq!(
-            csv.lines()
-                .flat_map(|line| line.into_iter()
-                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
+            csv.records()
+                .flat_map(|record| record.fields()
+                    .map(|field| field.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"b\"b", "0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789\"0123456789"]
         );
@@ -634,10 +687,10 @@ zzz,yyy,xxx"#,
 
         assert_eq!(
             parsed
-                .into_iter()
-                .map(|line| line
-                    .into_iter()
-                    .map(|record| record.as_str().unwrap().to_owned())
+                .records()
+                .map(|record| record
+                    .fields()
+                    .map(|field| field.as_str().unwrap().to_owned())
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec!["aaa", "bbb", "ccc"], vec!["zzz", "yyy", "xxx"]]
@@ -653,12 +706,13 @@ zzz,yyy,xxx"#,
 
         assert_eq!(
             parsed
-                .into_iter()
+                .lines()
                 .map(|line| if let Some(comment) = line.as_comment() {
                     vec![comment.unwrap().to_owned()]
                 } else {
-                    line.records()
-                        .map(|record| record.as_str().unwrap().to_owned())
+                    line.into_record()
+                        .fields()
+                        .map(|field| field.as_str().unwrap().to_owned())
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>(),
@@ -678,10 +732,10 @@ zzz,yyy,xxx"#,
 
         assert_eq!(
             parse(s)
-                .into_iter()
-                .flat_map(|line| line
-                    .into_iter()
-                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
+                .records()
+                .flat_map(|record| record
+                    .fields()
+                    .map(|field| field.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -691,10 +745,10 @@ zzz,yyy,xxx"#,
                 .without_double_quote()
                 .build()
                 .parse(s)
-                .into_iter()
-                .flat_map(|line| line
-                    .into_iter()
-                    .map(|record| record.unescaped::<str>().unwrap().into_owned()))
+                .records()
+                .flat_map(|record| record
+                    .fields()
+                    .map(|field| field.unescaped::<str>().unwrap().into_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "b\"\"bb", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -708,10 +762,10 @@ zzz,yyy,xxx"#,
 
         assert_eq!(
             parse(s)
-                .into_iter()
-                .flat_map(|line| line
-                    .into_iter()
-                    .map(|record| record.as_str().unwrap().to_owned()))
+                .records()
+                .flat_map(|record| record
+                    .fields()
+                    .map(|field| field.as_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b\nbb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -721,10 +775,10 @@ zzz,yyy,xxx"#,
                 .without_quoting()
                 .build()
                 .parse(s)
-                .into_iter()
-                .flat_map(|line| line
-                    .into_iter()
-                    .map(|record| record.as_str().unwrap().to_owned()))
+                .records()
+                .flat_map(|record| record
+                    .fields()
+                    .map(|field| field.as_str().unwrap().to_owned()))
                 .collect::<Vec<_>>(),
             vec!["aaa", "\"b", "bb\"", "ccc", "zzz", "yyy", "xxx"]
         );
@@ -742,18 +796,18 @@ zzz,yyy,xxx"#,
             .unwrap();
 
         assert!(parse(s.as_slice())
-            .into_iter()
-            .flat_map(|line| line
-                .into_iter()
-                .map(|record| record.as_str().map(|s| s.to_owned())))
+            .records()
+            .flat_map(|record| record
+                .fields()
+                .map(|field| field.as_str().map(|s| s.to_owned())))
             .collect::<Result<Vec<_>, str::Utf8Error>>()
             .is_err());
 
         assert_eq!(
             Parser::default()
                 .parse(s.as_slice())
-                .into_iter()
-                .flat_map(|line| line.into_iter().map(|record| record
+                .records()
+                .flat_map(|record| record.fields().map(|field| field
                     .unescape_string(encoding::all::GBK, encoding::DecoderTrap::Ignore)))
                 .collect::<Result<Vec<_>, encoding::CodecError>>()
                 .map_err(|_| ())

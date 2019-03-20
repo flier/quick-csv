@@ -31,7 +31,7 @@ fn parse_benchmark(c: &mut Criterion) {
 
                     for record in csv {
                         count_records += 1;
-                        count_fields += record.records().count();
+                        count_fields += record.fields().count();
                     }
 
                     assert_eq!(
