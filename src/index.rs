@@ -14,7 +14,7 @@ pub const QUOTE: u8 = b'"';
 pub const CR: u8 = b'\r';
 pub const LF: u8 = b'\n';
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Index {
     pub delimiters: Vec<u64>,
     pub quotes: Vec<u64>,
@@ -156,7 +156,7 @@ impl Index {
 }
 
 #[derive(Debug)]
-pub struct IndexBuilder {
+pub struct Builder {
     /// The delimiter that separates fields.
     delimiter: __m256i,
     /// The quotation byte.
@@ -173,13 +173,13 @@ pub struct IndexBuilder {
     index: Index,
 }
 
-impl Default for IndexBuilder {
+impl Default for Builder {
     fn default() -> Self {
-        IndexBuilder::new()
+        Builder::new()
     }
 }
 
-impl Deref for IndexBuilder {
+impl Deref for Builder {
     type Target = Index;
 
     fn deref(&self) -> &Self::Target {
@@ -187,19 +187,19 @@ impl Deref for IndexBuilder {
     }
 }
 
-impl DerefMut for IndexBuilder {
+impl DerefMut for Builder {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.index
     }
 }
 
-impl IndexBuilder {
+impl Builder {
     pub fn new() -> Self {
-        IndexBuilder::with_capacity(16)
+        Builder::with_capacity(16)
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        IndexBuilder {
+        Builder {
             delimiter: unsafe { mm256i(COMMA as i8) },
             quote: Some(unsafe { mm256i(QUOTE as i8) }),
             terminator: None,
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_build_structural_character_bitmap() {
-        let mut b = IndexBuilder::default();
+        let mut b = Builder::default();
 
         unsafe {
             b.build_structural_character_bitmap(br#"1997,Ford,E350,"Super, ""luxurious"" truck""#);
@@ -453,7 +453,7 @@ zzz,yyy,xxx"#,
 
     #[test]
     fn test_build_structural_quote_bitmap() {
-        let mut b = IndexBuilder::default();
+        let mut b = Builder::default();
 
         unsafe {
             b.build_structural_character_bitmap(
@@ -487,7 +487,7 @@ zzz,yyy,xxx"#,
 
     #[test]
     fn test_build_structural_line_bitmap() {
-        let mut b = IndexBuilder::default();
+        let mut b = Builder::default();
 
         unsafe {
             b.build_structural_character_bitmap(

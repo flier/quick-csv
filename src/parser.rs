@@ -1,11 +1,11 @@
 use alloc::borrow::Cow;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use core::ops::{Deref, Range};
-use core::ptr::NonNull;
 use core::str;
 
-use crate::index::{Index, IndexBuilder, COMMA, QUOTE};
+use crate::index::{Builder as IndexBuilder, Index, COMMA, QUOTE};
 
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -112,17 +112,20 @@ impl Parser {
         index_builder.build(buf);
 
         Lines {
-            buf,
-            index: index_builder.finalize(),
-            comment: self.comment,
+            inner: Rc::new(Inner {
+                buf,
+                index: index_builder.finalize(),
+                comment: self.comment,
+            }),
             line: 0,
             pos: 0,
         }
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Record<'a> {
-    line: NonNull<Line<'a>>,
+    inner: Rc<Inner<'a>>,
     span: Range<usize>,
     column: usize,
 }
@@ -130,7 +133,7 @@ pub struct Record<'a> {
 impl<'a> AsRef<[u8]> for Record<'a> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.line().lines().as_ref()[self.span.start..self.span.end]
+        &self.inner.buf[self.span.start..self.span.end]
     }
 }
 
@@ -141,18 +144,13 @@ impl<'a> Record<'a> {
     }
 
     #[inline]
-    pub fn line(&'a self) -> &'a Line<'a> {
-        unsafe { self.line.as_ref() }
-    }
-
-    #[inline]
     pub fn as_str(&self) -> Result<&str, str::Utf8Error> {
         str::from_utf8(self.as_ref())
     }
 
     #[inline]
     pub fn unescaped<T: Escaped<'a> + ?Sized>(&'a self) -> Result<T::Unescaped, T::Error> {
-        T::unescape(self.line().lines(), self.span.clone())
+        T::unescape(self.inner.buf, &self.inner.index, self.span.clone())
     }
 
     #[cfg(feature = "codec")]
@@ -161,9 +159,13 @@ impl<'a> Record<'a> {
         encoding: ::encoding::EncodingRef,
         trap: ::encoding::DecoderTrap,
     ) -> Result<String, ::encoding::CodecError> {
-        self.line()
-            .lines()
-            .unescape_string(self.span.clone(), encoding, trap)
+        unescape_string(
+            self.inner.buf,
+            &self.inner.index,
+            self.span.clone(),
+            encoding,
+            trap,
+        )
     }
 }
 
@@ -171,15 +173,23 @@ pub trait Escaped<'a> {
     type Unescaped;
     type Error;
 
-    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Self::Unescaped, Self::Error>;
+    fn unescape(
+        buf: &'a [u8],
+        index: &Index,
+        span: Range<usize>,
+    ) -> Result<Self::Unescaped, Self::Error>;
 }
 
 impl<'a> Escaped<'a> for str {
     type Unescaped = Cow<'a, str>;
     type Error = str::Utf8Error;
 
-    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Cow<'a, str>, Self::Error> {
-        lines.unescape_str(span.clone())
+    fn unescape(
+        buf: &'a [u8],
+        index: &Index,
+        span: Range<usize>,
+    ) -> Result<Cow<'a, str>, Self::Error> {
+        unescape_str(buf, index, span)
     }
 }
 
@@ -187,13 +197,18 @@ impl<'a> Escaped<'a> for [u8] {
     type Unescaped = Cow<'a, [u8]>;
     type Error = ();
 
-    fn unescape(lines: &'a Lines<'a>, span: Range<usize>) -> Result<Cow<'a, [u8]>, Self::Error> {
-        Ok(lines.unescape_bytes(span.clone()))
+    fn unescape(
+        buf: &'a [u8],
+        index: &Index,
+        span: Range<usize>,
+    ) -> Result<Cow<'a, [u8]>, Self::Error> {
+        Ok(unescape_bytes(buf, index, span))
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Line<'a> {
-    lines: NonNull<Lines<'a>>,
+    inner: Rc<Inner<'a>>,
     span: Range<usize>,
     line: usize,
     column: usize,
@@ -207,7 +222,7 @@ impl<'a> Iterator for Line<'a> {
         if self.pos >= self.span.end {
             None
         } else {
-            let span = self.lines().index.next_record(self.pos..self.span.end);
+            let span = self.inner.index.next_record(self.pos..self.span.end);
 
             trace!("found record @ {:?}", span);
 
@@ -215,7 +230,7 @@ impl<'a> Iterator for Line<'a> {
             self.column += 1;
 
             Some(Record {
-                line: unsafe { NonNull::new_unchecked(self as *mut _) },
+                inner: self.inner.clone(),
                 span,
                 column: self.column,
             })
@@ -226,16 +241,11 @@ impl<'a> Iterator for Line<'a> {
 impl<'a> AsRef<[u8]> for Line<'a> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.lines().as_ref()[self.span.start..self.span.end]
+        &self.inner.buf[self.span.start..self.span.end]
     }
 }
 
 impl<'a> Line<'a> {
-    #[inline]
-    pub fn lines(&'a self) -> &'a Lines<'a> {
-        unsafe { self.lines.as_ref() }
-    }
-
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.span.len() == 0
@@ -253,7 +263,7 @@ impl<'a> Line<'a> {
 
     #[inline]
     pub fn is_comment(&self) -> bool {
-        self.as_ref().first().cloned() == self.lines().comment
+        self.as_ref().first().cloned() == self.inner.comment
     }
 
     #[inline]
@@ -272,18 +282,24 @@ impl<'a> Line<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Lines<'a> {
+    inner: Rc<Inner<'a>>,
+    line: usize,
+    pos: usize,
+}
+
+#[derive(Debug)]
+struct Inner<'a> {
     buf: &'a [u8],
     index: Index,
     comment: Option<u8>,
-    line: usize,
-    pos: usize,
 }
 
 impl<'a> AsRef<[u8]> for Lines<'a> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        self.buf
+        self.inner.buf
     }
 }
 
@@ -292,7 +308,7 @@ impl<'a> Deref for Lines<'a> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.index
+        &self.inner.index
     }
 }
 
@@ -300,24 +316,27 @@ impl<'a> Iterator for Lines<'a> {
     type Item = Line<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.index.len {
+        if self.pos >= self.inner.index.len {
             None
         } else {
-            self.index.next_line(self.pos..self.index.len).map(|span| {
-                trace!("found line @ {:?}", span);
+            self.inner
+                .index
+                .next_line(self.pos..self.inner.index.len)
+                .map(|span| {
+                    trace!("found line @ {:?}", span);
 
-                let pos = span.start;
-                self.pos = span.end + 1;
-                self.line += 1;
+                    let pos = span.start;
+                    self.pos = span.end + 1;
+                    self.line += 1;
 
-                Line {
-                    lines: unsafe { NonNull::new_unchecked(self as *mut _) },
-                    span,
-                    line: self.line,
-                    column: 0,
-                    pos,
-                }
-            })
+                    Line {
+                        inner: self.inner.clone(),
+                        span,
+                        line: self.line,
+                        column: 0,
+                        pos,
+                    }
+                })
         }
     }
 }
@@ -328,134 +347,142 @@ impl<'a> Lines<'a> {
         self.line
     }
 
-    fn unescape_bytes(&self, mut span: Range<usize>) -> Cow<[u8]> {
-        debug_assert!(
-            span.start < self.index.len && span.end <= self.index.len,
-            "span={:?}, len={}",
-            span,
-            self.index.len
-        );
+    #[inline]
+    pub fn index(&self) -> &Index {
+        &self.inner.index
+    }
+}
 
-        if span.len() > 1
-            && !self.index.quotes.is_empty()
-            && self.index.is_quote(span.start)
-            && self.index.is_quote(span.end - 1)
-        {
-            span = span.start + 1..span.end - 1
-        }
+fn unescape_bytes<'a>(buf: &'a [u8], index: &Index, mut span: Range<usize>) -> Cow<'a, [u8]> {
+    debug_assert!(
+        span.start < index.len && span.end <= index.len,
+        "span={:?}, len={}",
+        span,
+        index.len
+    );
 
-        let mut off = span.start;
-        let mut v = vec![];
+    if span.len() > 1
+        && !index.quotes.is_empty()
+        && index.is_quote(span.start)
+        && index.is_quote(span.end - 1)
+    {
+        span = span.start + 1..span.end - 1
+    }
 
-        while let Some(pos) = self.index.next_escape(off..span.end) {
-            v.extend_from_slice(&self.buf[off..pos]);
-            off = pos + 1;
-            if span.end < off {
-                break;
-            }
-        }
+    let mut off = span.start;
+    let mut v = vec![];
 
-        if off == span.start {
-            (&self.buf[span.clone()]).into()
-        } else {
-            v.extend_from_slice(&self.buf[off..span.end]);
-            v.into()
+    while let Some(pos) = index.next_escape(off..span.end) {
+        v.extend_from_slice(&buf[off..pos]);
+        off = pos + 1;
+        if span.end < off {
+            break;
         }
     }
 
-    fn unescape_str(&self, mut span: Range<usize>) -> Result<Cow<str>, str::Utf8Error> {
-        debug_assert!(
-            span.start < self.index.len && span.end <= self.index.len,
-            "span={:?}, len={}",
-            span,
-            self.index.len
-        );
+    if off == span.start {
+        (&buf[span.clone()]).into()
+    } else {
+        v.extend_from_slice(&buf[off..span.end]);
+        v.into()
+    }
+}
 
-        if span.len() > 1
-            && !self.index.quotes.is_empty()
-            && self.index.is_quote(span.start)
-            && self.index.is_quote(span.end - 1)
-        {
-            span = span.start + 1..span.end - 1
+fn unescape_str<'a>(
+    buf: &'a [u8],
+    index: &Index,
+    mut span: Range<usize>,
+) -> Result<Cow<'a, str>, str::Utf8Error> {
+    debug_assert!(
+        span.start < index.len && span.end <= index.len,
+        "span={:?}, len={}",
+        span,
+        index.len
+    );
+
+    if span.len() > 1
+        && !index.quotes.is_empty()
+        && index.is_quote(span.start)
+        && index.is_quote(span.end - 1)
+    {
+        span = span.start + 1..span.end - 1
+    }
+
+    let mut off = span.start;
+    let mut s = String::new();
+
+    while let Some(pos) = index.next_escape(off..span.end) {
+        s.push_str(str::from_utf8(&buf[off..pos])?);
+        off = pos + 1;
+        if span.end < off {
+            break;
         }
+    }
 
-        let mut off = span.start;
-        let mut s = String::new();
-
-        while let Some(pos) = self.index.next_escape(off..span.end) {
-            s.push_str(str::from_utf8(&self.buf[off..pos])?);
-            off = pos + 1;
-            if span.end < off {
-                break;
-            }
-        }
-
-        if off == span.start {
-            str::from_utf8(&self.buf[span.clone()]).map(|s| s.into())
-        } else {
-            s.push_str(str::from_utf8(&self.buf[off..span.end])?);
-            Ok(s.into())
-        }
+    if off == span.start {
+        str::from_utf8(&buf[span.clone()]).map(|s| s.into())
+    } else {
+        s.push_str(str::from_utf8(&buf[off..span.end])?);
+        Ok(s.into())
     }
 }
 
 #[cfg(feature = "codec")]
-impl<'a> Lines<'a> {
-    fn unescape_string(
-        &self,
-        mut span: Range<usize>,
-        encoding: ::encoding::EncodingRef,
-        trap: ::encoding::DecoderTrap,
-    ) -> Result<String, ::encoding::CodecError> {
-        debug_assert!(
-            span.start < self.index.len && span.end <= self.index.len,
-            "span={:?}, len={}",
-            span,
-            self.index.len
-        );
+fn unescape_string(
+    buf: &[u8],
+    index: &Index,
+    mut span: Range<usize>,
+    encoding: ::encoding::EncodingRef,
+    trap: ::encoding::DecoderTrap,
+) -> Result<String, ::encoding::CodecError> {
+    debug_assert!(
+        span.start < index.len && span.end <= index.len,
+        "span={:?}, len={}",
+        span,
+        index.len
+    );
 
-        if span.len() > 1
-            && !self.index.quotes.is_empty()
-            && self.index.is_quote(span.start)
-            && self.index.is_quote(span.end - 1)
-        {
-            span = span.start + 1..span.end - 1
-        }
+    if span.len() > 1
+        && !index.quotes.is_empty()
+        && index.is_quote(span.start)
+        && index.is_quote(span.end - 1)
+    {
+        span = span.start + 1..span.end - 1
+    }
 
-        let mut off = span.start;
-        let mut s = String::new();
+    let mut off = span.start;
+    let mut s = String::new();
 
-        while let Some(pos) = self.index.next_escape(off..span.end) {
-            s.push_str(&encoding.decode(&self.buf[off..pos], trap).map_err(|s| {
-                ::encoding::CodecError {
-                    upto: off as isize,
-                    cause: s,
-                }
-            })?);
-            off = pos + 1;
-            if span.end < off {
-                break;
-            }
-        }
-
-        if off == span.start {
-            encoding
-                .decode(&self.buf[off..span.end], trap)
+    while let Some(pos) = index.next_escape(off..span.end) {
+        s.push_str(
+            &encoding
+                .decode(&buf[off..pos], trap)
                 .map_err(|s| ::encoding::CodecError {
                     upto: off as isize,
                     cause: s,
-                })
-        } else {
-            s.push_str(
-                &encoding
-                    .decode(&self.buf[off..span.end], trap)
-                    .map_err(|s| ::encoding::CodecError {
-                        upto: off as isize,
-                        cause: s,
-                    })?,
-            );
-            Ok(s)
+                })?,
+        );
+        off = pos + 1;
+        if span.end < off {
+            break;
         }
+    }
+
+    if off == span.start {
+        encoding
+            .decode(&buf[off..span.end], trap)
+            .map_err(|s| ::encoding::CodecError {
+                upto: off as isize,
+                cause: s,
+            })
+    } else {
+        s.push_str(&encoding.decode(&buf[off..span.end], trap).map_err(|s| {
+            ::encoding::CodecError {
+                upto: off as isize,
+                cause: s,
+            }
+        })?);
+        Ok(s)
     }
 }
 
