@@ -1,0 +1,4 @@
+# cargo-fuzz
+target
+corpus
+artifacts

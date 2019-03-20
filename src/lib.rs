@@ -18,4 +18,5 @@ mod avx;
 pub mod index;
 mod parser;
 
+pub use index::{build, Index};
 pub use parser::{parse, Builder, Escaped, Line, Lines, Parsed, Parser, Record, Records};

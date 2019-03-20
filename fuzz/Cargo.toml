@@ -1,0 +1,26 @@
+
+[package]
+name = "quick-csv-fuzz"
+version = "0.0.1"
+authors = ["Automatically generated"]
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies.quick-csv]
+path = ".."
+[dependencies.libfuzzer-sys]
+git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "build_index"
+path = "fuzz_targets/build_index.rs"
+
+[[bin]]
+name = "parse_csv"
+path = "fuzz_targets/parse_csv.rs"
