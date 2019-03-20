@@ -8,10 +8,13 @@ use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_feature = "avx")]
-use crate::avx::*;
-#[cfg(not(target_feature = "avx"))]
-use crate::emulated::*;
+cfg_if! {
+    if #[cfg(target_feature = "avx")] {
+        use crate::avx::*;
+    } else {
+        use crate::emulated::*;
+    }
+}
 
 pub(crate) const COMMA: u8 = b',';
 pub(crate) const QUOTE: u8 = b'"';

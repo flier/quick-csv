@@ -17,10 +17,13 @@ cfg_if! {
     }
 }
 
-#[cfg(target_feature = "avx")]
-mod avx;
-#[cfg(not(target_feature = "avx"))]
-mod emulated;
+cfg_if! {
+    if #[cfg(target_feature = "avx")] {
+        mod avx;
+    } else {
+        mod emulated;
+    }
+}
 
 pub mod index;
 pub mod parse;
