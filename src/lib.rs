@@ -19,10 +19,9 @@ cfg_if! {
 
 mod avx;
 pub mod index;
-mod parser;
+pub mod parser;
 
 #[doc(inline)]
-pub use index::{build, Index};
-pub use parser::{
-    parse, Builder, Escaped, Field, Fields, Line, Lines, Parsed, Parser, Record, Records,
-};
+pub use index::build;
+#[doc(inline)]
+pub use parser::parse;

@@ -71,7 +71,7 @@ impl Builder {
     }
 }
 
-/// A `Parser` that parses the CSV input.
+/// A parser that parses the CSV input.
 #[derive(Debug)]
 pub struct Parser {
     /// The delimiter that separates fields.
@@ -287,7 +287,7 @@ impl<'a> IntoIterator for Record<'a> {
 }
 
 impl<'a> Record<'a> {
-    /// An iterator over the fields of record.
+    /// An iterator over the fields of `Record`.
     #[inline]
     pub fn fields(&self) -> Fields<'a> {
         Fields {
@@ -386,7 +386,7 @@ impl<'a> Line<'a> {
     }
 }
 
-/// An iterator over the fields of record.
+/// An iterator over the fields of `Record`.
 #[derive(Clone, Debug)]
 pub struct Fields<'a> {
     inner: Rc<Inner<'a>>,
@@ -439,7 +439,7 @@ impl<'a> Iterator for Fields<'a> {
     }
 }
 
-/// The `Field` of `Record`.
+/// A field of `Record`.
 #[derive(Clone, Debug)]
 pub struct Field<'a> {
     inner: Rc<Inner<'a>>,

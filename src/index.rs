@@ -19,7 +19,7 @@ pub(crate) const QUOTE: u8 = b'"';
 pub(crate) const CR: u8 = b'\r';
 pub(crate) const LF: u8 = b'\n';
 
-/// Build the index with input.
+/// Build the `Index` with input slice.
 pub fn build(buf: &[u8]) -> Index {
     let mut b = Builder::default();
 
