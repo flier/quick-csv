@@ -368,17 +368,20 @@ impl Builder {
         let len = self.index.quotes.len();
         let mut escapes = Vec::with_capacity(len);
 
-        for i in 0..len - 1 {
-            let dquote = ((self.index.quotes[i] >> 1) | self.index.quotes[i + 1] << 63)
-                & self.index.quotes[i];
-            self.index.quotes[i] &= !(dquote | dquote << 1);
-            escapes.push(dquote);
+        if len > 1 {
+            for i in 0..len - 1 {
+                let dquote = ((self.index.quotes[i] >> 1) | self.index.quotes[i + 1] << 63)
+                    & self.index.quotes[i];
+                self.index.quotes[i] &= !(dquote | dquote << 1);
+                escapes.push(dquote);
+            }
         }
 
-        let b = &mut self.index.quotes[len - 1];
-        let dquote = (*b >> 1) & *b;
-        *b &= !(dquote | dquote << 1);
-        escapes.push(dquote);
+        if let Some(b) = self.index.quotes.last_mut() {
+            let dquote = (*b >> 1) & *b;
+            *b &= !(dquote | dquote << 1);
+            escapes.push(dquote);
+        }
 
         escapes
     }
@@ -403,7 +406,11 @@ impl Builder {
 
                     quote_count += self.index.quotes[i].wrapping_shl(64 - n).count_ones();
 
-                    w >>= n + 1;
+                    w = if n == 63 {
+                        0
+                    } else {
+                        (w >> (n + 1)) & ((1 << (n + 1)) - 1)
+                    };
 
                     if (quote_count & 1) == 1 {
                         *b &= !(1 << n);

@@ -3,7 +3,7 @@
 extern crate quick_csv;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(s) = std::str::from_utf8(data) {
+    if let Ok(_) = std::str::from_utf8(data) {
         let _ = quick_csv::parse(data);
     }
 });
