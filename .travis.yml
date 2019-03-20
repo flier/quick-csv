@@ -1,0 +1,29 @@
+sudo: false
+language: rust
+os:
+  - linux
+  - osx
+cache: cargo
+rust:
+  - stable
+  - beta
+  - nightly
+matrix:
+  include:
+    - rust: stable
+    - rust: beta
+    - rust: nightly
+      env: CARGOFLAGS="--no-default-features"
+    - rust: nightly
+      env: CARGOFLAGS="--no-default-features --features std"
+    - rust: nightly
+      env: CARGOFLAGS="--no-default-features --features serde"
+    - rust: nightly
+      env: CARGOFLAGS="--no-default-features --features codec"
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
+env:
+  - RUSTFLAGS="-C target-cpu=native"
+script:
+  - RUST_BACKTRACE=full cargo test --verbose $CARGOFLAGS
