@@ -19,9 +19,9 @@ cfg_if! {
 
 mod avx;
 pub mod index;
-pub mod parser;
+pub mod parse;
 
 #[doc(inline)]
 pub use index::build;
 #[doc(inline)]
-pub use parser::parse;
+pub use parse::parse;
